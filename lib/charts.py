@@ -1,3 +1,4 @@
+# lib/charts.py
 from __future__ import annotations
 
 import pandas as pd
@@ -25,19 +26,23 @@ def field_mix_bars(
     show_y_labels: bool = True,
 ):
     """
-    Horizontal stacked bars of field distribution, colored by domain.
-    Darker shade shows the ISITE segment.
-    Expects columns: field, count, in_lue_count.
+    Horizontal stacked bars of field distribution by domain.
+    Segments: "ISITE" (darker) and "Not ISITE".
+    Ensures all fields in `enforce_order_from` appear (with zero bars if absent).
     """
-    if df.empty:
-        return alt.Chart(pd.DataFrame({"field": [], "value": []})).mark_bar()
+    # ---------- ensure all requested fields exist (with zeros) ----------
+    fields_full = enforce_order_from or sorted(df["field"].dropna().unique().tolist())
+    base = pd.DataFrame({"field": fields_full})
+    base["domain"] = base["field"].map(map_field_to_domain)
 
     d = df.copy()
-    d["domain"] = d["field"].map(map_field_to_domain)
     d["in_lue_count"] = pd.to_numeric(d["in_lue_count"], errors="coerce").fillna(0).astype(int)
     d[value_col] = pd.to_numeric(d[value_col], errors="coerce").fillna(0)
 
-    # Build segments with friendly names
+    d = base.merge(d[["field", value_col, "in_lue_count"]], on="field", how="left")
+    d[[value_col, "in_lue_count"]] = d[[value_col, "in_lue_count"]].fillna(0)
+
+    # ---------- segments with friendly names ----------
     d["Not ISITE"] = d[value_col] - d["in_lue_count"]
     d["ISITE"] = d["in_lue_count"]
     d = d.melt(
@@ -54,22 +59,21 @@ def field_mix_bars(
 
     d["color"] = d.apply(lambda r: _color_for_row(r["domain"], bool(r["is_lue"])), axis=1)
 
-    # Fixed order by domain then alphabetical – include fields not present for this lab
-    present_fields = d["field"].dropna().unique().tolist()
-    order = field_order(enforce_order_from or present_fields)
+    # fixed order (domain buckets → alpha)
+    order = field_order(fields_full)
+    chart_height = max(200, int(len(order) * height_per_field))
 
-    # Dynamic height so every label is visible
-    chart_height = max(180, int(len(order) * height_per_field))
-
-    # X axis and scale
+    # x axis and scale
     x_axis = (alt.Axis(format="%", tickCount=5) if percent else alt.Axis())
     if percent:
         x_scale = alt.Scale(domain=[0, 1])
     else:
-        # Shared domain across charts if xmax provided
         lo = 0 if xmin is None else xmin
         x_scale = alt.Scale(domain=[lo, xmax] if xmax is not None else None)
 
+    # IMPORTANT: reserve the same space for the left margin so bar widths match on both panels
+    # (axis space varies with labels; padding keeps the plotting width identical)
+    padding = {"left": 160, "right": 20, "top": 6, "bottom": 8}
     y_axis = alt.Axis(labelLimit=2000, labels=show_y_labels, ticks=show_y_labels)
 
     tooltip = [
@@ -88,6 +92,6 @@ def field_mix_bars(
             color=alt.Color("color:N", scale=None, legend=None),
             tooltip=tooltip,
         )
-        .properties(height=chart_height)
+        .properties(height=chart_height, padding=padding)
     )
     return chart
