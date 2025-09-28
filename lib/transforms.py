@@ -36,3 +36,7 @@ def field_order(all_fields: list[str]) -> list[str]:
     for d in DOMAIN_NAMES + ["Other"]:
         ordered.extend(sorted(buckets.get(d, [])))
     return ordered
+
+def all_fields_order() -> list[str]:
+    """Canonical order of ALL fields (domain ordering, then A→Z inside each)."""
+    return field_order(list(FIELDS_TO_DOMAIN.keys()))

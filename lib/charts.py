@@ -1,3 +1,4 @@
+# lib/charts.py
 from __future__ import annotations
 import pandas as pd
 import altair as alt
@@ -14,18 +15,17 @@ def field_mix_bars(
     df: pd.DataFrame,
     value_col: str = "count",
     percent: bool = False,
-    height_per_field: int = 20,      # a bit tighter
+    height_per_field: int = 18,          # tighter rows
     xmin: float | None = 0.0,
     xmax: float | None = None,
-    enforce_order_from: list[str] | None = None,
+    enforce_order_from: list[str] | None = None,  # pass the full field catalogue here
     show_y_labels: bool = True,
 ):
     """
     Horizontal stacked bars of field distribution by domain.
     Segments: "ISITE" (darker) and "Not ISITE".
-    Ensures all fields in `enforce_order_from` appear (with zero bars if absent).
+    Ensures *every* field in `enforce_order_from` appears (zero bars if absent).
     """
-    # ensure all requested fields are present (zeros if missing)
     fields_full = enforce_order_from or sorted(df["field"].dropna().unique().tolist())
     base = pd.DataFrame({"field": fields_full})
     base["domain"] = base["field"].map(map_field_to_domain)
@@ -37,7 +37,6 @@ def field_mix_bars(
     d = base.merge(d[["field", value_col, "in_lue_count"]], on="field", how="left")
     d[[value_col, "in_lue_count"]] = d[[value_col, "in_lue_count"]].fillna(0)
 
-    # friendly segment names
     d["Not ISITE"] = d[value_col] - d["in_lue_count"]
     d["ISITE"] = d["in_lue_count"]
     d = d.melt(
@@ -55,24 +54,19 @@ def field_mix_bars(
     d["color"] = d.apply(lambda r: _color_for_row(r["domain"], bool(r["is_lue"])), axis=1)
 
     order = field_order(fields_full)
-    chart_height = max(180, int(len(order) * height_per_field))
+    chart_height = max(200, int(len(order) * height_per_field))
 
-    # x axis & scale
+    # axes/scales
     x_axis = (alt.Axis(format="%", tickCount=5) if percent else alt.Axis())
     if percent:
         x_scale = alt.Scale(domain=[0, 1])
     else:
         lo = 0 if xmin is None else xmin
-        if xmax is not None and xmax > 0:
-            x_scale = alt.Scale(domain=[lo, xmax])
-        else:
-            x_scale = alt.Scale()
+        x_scale = alt.Scale(domain=[lo, xmax] if xmax and xmax > 0 else None)
 
-    # slimmer axis + fixed left padding so both panels get same plot width
-    y_axis = alt.Axis(
-        labelLimit=2000, labels=show_y_labels, ticks=False, labelFontSize=12, labelPadding=4
-    )
-    padding = {"left": 120, "right": 8, "top": 2, "bottom": 4}
+    # much slimmer left margin; labels on both
+    y_axis = alt.Axis(labels=show_y_labels, ticks=False, labelFontSize=11, labelPadding=2, labelLimit=9999)
+    padding = {"left": 90, "right": 6, "top": 2, "bottom": 4}
 
     tooltip = [
         alt.Tooltip("field:N", title="Field"),
@@ -81,7 +75,7 @@ def field_mix_bars(
         alt.Tooltip("value:Q", title=("Share" if percent else "Count"), format=(".0%" if percent else ",")),
     ]
 
-    chart = (
+    return (
         alt.Chart(d)
         .mark_bar()
         .encode(
@@ -92,4 +86,3 @@ def field_mix_bars(
         )
         .properties(height=chart_height, padding=padding)
     )
-    return chart

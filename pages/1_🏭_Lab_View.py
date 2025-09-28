@@ -2,8 +2,12 @@
 from __future__ import annotations
 
 import pandas as pd
+import re
 import streamlit as st
 import altair as alt
+from lib.transforms import all_fields_order
+
+from lib.data_io import explode_authors, author_global_metrics, load_authors_lookup
 
 from lib.constants import YEAR_START, YEAR_END
 from lib.data_io import (
@@ -134,7 +138,10 @@ left_df  = lfc[lfc["lab_ror"].eq(left_ror)].copy()
 right_df = lfc[lfc["lab_ror"].eq(right_ror)].copy()
 all_fields = list(lfc["field"].unique())
 
-# same xmax for volume (across both labs) and fixed order across both panels
+# --- Compare two labs ---------------------------------------------------------------
+catalogue = all_fields_order()  # full fixed list from constants
+
+# same xmax for the volume plots across both labs
 xmax = float(pd.concat([left_df["count"], right_df["count"]]).max() or 0)
 
 pL, pR = st.columns(2, gap="large")
@@ -148,8 +155,13 @@ for side, title, df_lab in [(pL, left_label, left_df), (pR, right_label, right_d
         st.markdown("**Field distribution (volume)**")
         st.altair_chart(
             field_mix_bars(
-                df_lab, value_col="count", percent=False,
-                xmax=xmax, enforce_order_from=all_fields, show_y_labels=True
+                df_lab,
+                value_col="count",
+                percent=False,
+                xmax=xmax,
+                enforce_order_from=catalogue,   # <-- use the fixed catalogue
+                show_y_labels=True,
+                width=560,                       # optional: keeps identical plot width
             ),
             use_container_width=True,
         )
@@ -157,8 +169,13 @@ for side, title, df_lab in [(pL, left_label, left_df), (pR, right_label, right_d
         st.markdown("**Field distribution (% of lab works)**")
         st.altair_chart(
             field_mix_bars(
-                df_lab, value_col="count", percent=True,
-                xmax=1.0, enforce_order_from=all_fields, show_y_labels=True
+                df_lab,
+                value_col="count",
+                percent=True,
+                xmax=1.0,
+                enforce_order_from=catalogue,   # <-- use the fixed catalogue
+                show_y_labels=True,
+                width=560,
             ),
             use_container_width=True,
         )
@@ -242,51 +259,110 @@ else:
     )
     st.altair_chart(chart, use_container_width=True)
 
-    # --- Top authors (on co-pubs)
-    # Parse Authors column like: "[1] Jane Doe | [2] John Smith"
-    def _extract_authors(s: str) -> list[str]:
-        if not isinstance(s, str): return []
-        parts = [p.strip() for p in s.split("|") if p.strip()]
-        clean = []
-        for p in parts:
-            # drop leading "[n]" if present
-            if "]" in p and p.startswith("["):
-                p = p.split("]", 1)[1].strip()
-            clean.append(p)
-        return clean
+    # --- Top authors (co-pubs) + enrich with global metrics + authors dict
+    authors_series = copubs.get("authors", pd.Series([None]*len(copubs)))
+    authors_ids    = copubs.get("authors_id", pd.Series([None]*len(copubs)))
+    fwcis          = pd.to_numeric(copubs["fwci"], errors="coerce")
 
-    authors_series = cop.get("Authors", pd.Series([None]*len(cop)))
-    auth = pd.DataFrame({
-        "openalex_id": cop["openalex_id"].values,
-        "fwci": pd.to_numeric(cop["fwci"], errors="coerce").values,
-        "authors": authors_series.apply(_extract_authors).values,
-    })
-    auth = auth.explode("authors").dropna()
-    top_auth = (
-        auth.groupby("authors", as_index=False)
-            .agg(count=("openalex_id", "nunique"), avg_fwci=("fwci", "mean"))
-            .sort_values(["count", "avg_fwci"], ascending=[False, False])
-            .head(25)
+    # explode authors for the co-publications subset
+    ea_rows = []
+    LEAD_IDX_RE = re.compile(r"^\[\d+\]\s*")
+    for _, r in copubs[["openalex_id","authors","authors_id","fwci"]].iterrows():
+        names = [LEAD_IDX_RE.sub("", x).strip() for x in str(r["authors"] or "").split("|") if x.strip()]
+        ids   = [LEAD_IDX_RE.sub("", x).strip() for x in str(r["authors_id"] or "").split("|") if x.strip()]
+        if len(names) < len(ids): names += [""]*(len(ids)-len(names))
+        if len(ids) < len(names): ids += [""]*(len(names)-len(ids))
+        for nm, aid in zip(names, ids):
+            if not aid and not nm: 
+                continue
+            ea_rows.append({"author_id": aid, "Author": nm, "openalex_id": r["openalex_id"], "fwci": r["fwci"]})
+    ea = pd.DataFrame(ea_rows)
+
+    # counts *within the co-pubs set*
+    top_counts = (
+        ea.groupby(["author_id","Author"], as_index=False)
+        .agg(Publications=("openalex_id","nunique"))
+        .sort_values("Publications", ascending=False)
     )
+
+    # join global author metrics computed on the whole dataset
+    global_metrics = author_global_metrics(pubs)
+    global_metrics = global_metrics.rename(columns={
+        "author_id":"author_id",
+        "author_name":"Author",
+        "total_pubs":"Total publications",
+        "avg_fwci_overall":"Avg. FWCI (overall)",
+        "labs_concat":"Lab(s)",
+    })
+
+    # optional dictionary (adds ORCID + Is Lorraine when available)
+    auth_dict = load_authors_lookup()
+    if auth_dict is not None and not auth_dict.empty:
+        auth_dict = auth_dict[["author_id","orcid","is_lorraine","labs_from_dict"]].copy()
+        auth_dict = auth_dict.rename(columns={
+            "orcid":"ORCID",
+            "is_lorraine":"Is Lorraine",
+            "labs_from_dict":"Lab(s) (dict)",
+        })
+    else:
+        auth_dict = pd.DataFrame(columns=["author_id","ORCID","Is Lorraine","Lab(s) (dict)"])
+
+    top_authors = (
+        top_counts.merge(global_metrics, on=["author_id","Author"], how="left")
+                .merge(auth_dict, on="author_id", how="left")
+    )
+
+    # prefer dict labs if present
+    top_authors["Lab(s)"] = top_authors["Lab(s) (dict)"].fillna(top_authors["Lab(s)"])
+    top_authors = top_authors.drop(columns=["Lab(s) (dict)"], errors="ignore")
+
+    # order and show
+    top_authors = top_authors.sort_values(["Publications","Avg. FWCI (overall)"], ascending=[False,False]).head(25)
+
     st.markdown("**Top authors in these co-publications**")
     st.dataframe(
-        top_auth.rename(columns={"authors": "Author", "count": "Publications", "avg_fwci": "Avg. FWCI"}),
+        top_authors[["Author","author_id","ORCID","Publications","Total publications","Avg. FWCI (overall)","Is Lorraine","Lab(s)"]],
         use_container_width=True, hide_index=True,
         column_config={
+            "author_id": st.column_config.TextColumn("Author ID"),
             "Publications": st.column_config.NumberColumn(format="%.0f"),
-            "Avg. FWCI": st.column_config.NumberColumn(format="%.2f"),
+            "Total publications": st.column_config.NumberColumn(format="%.0f"),
+            "Avg. FWCI (overall)": st.column_config.NumberColumn(format="%.2f"),
         },
     )
 
-    # --- All co-publications table + CSV export
-    cols = [c for c in ["OpenAlex ID", "DOI", "Publication Year", "Title"] if c in cop.columns]
-    if cols:
-        copub_table = cop[cols].drop_duplicates()
-        st.markdown("**All co-publications (exportable)**")
-        st.dataframe(copub_table, use_container_width=True, hide_index=True)
-        csv = copub_table.to_csv(index=False).encode("utf-8-sig")
-        st.download_button("Download CSV", data=csv, file_name=f"copubs_{left_label}_{right_label}_{year_min}-{year_max}.csv", mime="text/csv")
+    # --- All co-publications table + CSV export (richer)
+    cols = []
+    rename_out = {}
+    for c_in, c_out in [
+        ("openalex_id", "OpenAlex ID"),
+        ("DOI", "DOI"),
+        ("pub_type", "Publication Type"),
+        ("year", "Publication Year"),
+        ("title", "Title"),
+        ("citation_count", "Citation Count"),
+        ("fwci", "Field-Weighted Citation Impact"),
+        ("in_lue", "In LUE"),
+        ("All Topics", "All Topics"),
+        ("All Subfields", "All Subfields"),
+        ("all_fields", "All Fields"),
+        ("All Domains", "All Domains"),
+    ]:
+        if c_in in copubs.columns:
+            cols.append(c_in); rename_out[c_in] = c_out
+        elif c_in in ["all_fields"]:  # our normalized name
+            cols.append("all_fields"); rename_out["all_fields"] = "All Fields"
 
+    copub_table = copubs[cols].rename(columns=rename_out).drop_duplicates()
+    st.markdown("**All co-publications (exportable)**")
+    st.dataframe(copub_table, use_container_width=True, hide_index=True)
+    csv = copub_table.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "Download CSV",
+        data=csv,
+        file_name=f"copubs_{left_label}_{right_label}_{year_min}-{year_max}.csv",
+        mime="text/csv",
+    )
 
 st.divider()
 st.markdown("Use the sidebar to return to **Home** and switch dashboards.")

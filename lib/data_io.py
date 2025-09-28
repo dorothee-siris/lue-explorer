@@ -34,6 +34,18 @@ def load_core(data_path: str | None = None) -> pd.DataFrame:
         "Labs_RORs": "labs_rors",
         "Labs_Names": "labs_names",
     }
+    rename_map.update({
+        "Authors": "authors",
+        "Authors ID": "authors_id",
+        "Authors ORCID": "authors_orcid",
+        "Publication Type": "pub_type",
+        "Citation Count": "citation_count",
+        "Title": "title",
+        "Institution Types": "inst_types",
+        "Institution Countries": "inst_countries",
+    })
+
+
     df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
     needed = ["openalex_id", "year", "fwci", "all_fields", "in_lue", "labs_rors", "labs_names"]
     miss = [c for c in needed if c not in df.columns]
@@ -263,3 +275,87 @@ def topline_metrics(pubs: pd.DataFrame, internal: pd.DataFrame | None) -> dict:
         "n_pubs_total_19_23": total,
         "n_pubs_lab_19_23": covered,
     }
+
+import re
+
+PIPE_SPLIT_RE2 = re.compile(r"\s*\|\s*")
+LEAD_IDX_RE = re.compile(r"^\[\d+\]\s*")
+
+@st.cache_data(show_spinner=False)
+def explode_authors(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Turn (Authors, Authors ID) pipe-lists into rows: openalex_id, author_id, author_name.
+    Keeps fwci, year, labs_names for later aggregates.
+    """
+    cols_needed = ["openalex_id", "authors", "authors_id", "fwci", "year", "labs_names"]
+    for c in cols_needed:
+        if c not in df.columns:
+            df[c] = None
+
+    rows = []
+    for _, r in df[cols_needed].iterrows():
+        names = str(r["authors"] or "").split("|")
+        ids   = str(r["authors_id"] or "").split("|")
+        # clean
+        names = [LEAD_IDX_RE.sub("", n).strip() for n in names if n.strip()]
+        ids   = [LEAD_IDX_RE.sub("", a).strip() for a in ids if a.strip()]
+        # align lengths
+        if len(names) < len(ids): names += [""]*(len(ids)-len(names))
+        if len(ids)   < len(names): ids += [""]*(len(names)-len(ids))
+        for nm, aid in zip(names, ids):
+            if not aid and not nm: 
+                continue
+            rows.append({
+                "openalex_id": r["openalex_id"],
+                "author_id": aid,
+                "author_name": nm,
+                "fwci": r["fwci"],
+                "year": r["year"],
+                "labs_names": r["labs_names"],
+            })
+    return pd.DataFrame(rows)
+
+@st.cache_data(show_spinner=False)
+def author_global_metrics(pubs: pd.DataFrame) -> pd.DataFrame:
+    """
+    Global metrics across the whole dataset per author_id:
+      total_pubs, avg_fwci_overall, labs_concat (unique)
+    """
+    ea = explode_authors(pubs)
+    if ea.empty:
+        return pd.DataFrame(columns=["author_id","author_name","total_pubs","avg_fwci_overall","labs_concat"])
+    g = ea.groupby(["author_id", "author_name"], as_index=False).agg(
+        total_pubs=("openalex_id", "nunique"),
+        avg_fwci_overall=("fwci", "mean"),
+        labs_concat=("labs_names", lambda s: " | ".join(sorted({x.strip() for x in "|".join([str(v) for v in s]).split("|") if x.strip()}))),
+    )
+    return g
+
+@st.cache_data(show_spinner=False)
+def load_authors_lookup(data_path: str | None = None) -> pd.DataFrame | None:
+    """
+    Optional: load your authors dictionary (e.g., dict_authors.parquet).
+    Expected (flexible) columns: Author ID, ORCID, Is Lorraine, Lab(s), Avg FWCI, Total pubs.
+    """
+    # try a few common names
+    for fname in ["dict_authors.parquet", "authors_dict.parquet", "authors_lookup.parquet"]:
+        try:
+            df = load_parquet(fname, data_path)
+            break
+        except Exception:
+            df = None
+    if df is None:
+        return None
+
+    # normalize columns
+    low = {c.lower(): c for c in df.columns}
+    mapping = {
+        low.get("author id", low.get("author_id", "Author ID")): "author_id",
+        low.get("orcid", "ORCID"): "orcid",
+        low.get("is lorraine", low.get("is_lorraine", "Is Lorraine")): "is_lorraine",
+        low.get("lab(s)", low.get("labs", "Lab(s)")): "labs_from_dict",
+        low.get("average fwci", low.get("avg fwci", "Average FWCI")): "avg_fwci_overall_dict",
+        low.get("total publications", low.get("total pubs", "Total Publications")): "total_pubs_dict",
+    }
+    df = df.rename(columns=mapping)
+    return df
