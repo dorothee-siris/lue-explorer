@@ -54,8 +54,8 @@ st.dataframe(
     column_config={
         "lab_name": st.column_config.TextColumn("Lab"),
         "pubs_19_23": st.column_config.NumberColumn("Publications", format=","),
-        "share_among_lab_works": st.column_config.ProgressColumn(
-            "% of publications covered by labs", format="%.1f%%", min_value=0.0, max_value=1.0
+        "share_of_dataset_works": st.column_config.ProgressColumn(
+            "% of all publications (2019–2023)", format="%.1f%%", min_value=0.0, max_value=1.0
         ),
         "avg_fwci": st.column_config.NumberColumn("Avg FWCI", format="%.2f"),
         "lab_ror": st.column_config.TextColumn("ROR ID"),

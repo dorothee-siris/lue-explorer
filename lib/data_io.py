@@ -143,17 +143,19 @@ def lab_field_counts(pubs: pd.DataFrame) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def lab_summary_table(pubs: pd.DataFrame, internal: pd.DataFrame | None) -> pd.DataFrame:
-    """Per-lab summary: name, pubs 2019–23, share among lab-covered works, avg FWCI, ROR, links."""
     lab_pubs = explode_labs(pubs)
     lab_pubs = lab_pubs[(lab_pubs["year"] >= YEAR_START) & (lab_pubs["year"] <= YEAR_END)].copy()
 
-    works_with_any_lab = lab_pubs["openalex_id"].nunique()
+    # total unique works in WHOLE DATASET (2019–2023)
+    total_dataset_works = pubs.loc[
+        (pubs["year"] >= YEAR_START) & (pubs["year"] <= YEAR_END), "openalex_id"
+    ].nunique()
 
     g = lab_pubs.groupby(["lab_ror"], as_index=False).agg(
         pubs_19_23=("openalex_id", "nunique"),
         avg_fwci=("fwci", "mean"),
     )
-    g["share_among_lab_works"] = g["pubs_19_23"].div(works_with_any_lab if works_with_any_lab else 1)
+    g["share_of_dataset_works"] = g["pubs_19_23"].div(total_dataset_works if total_dataset_works else 1)
 
     if internal is not None and not internal.empty:
         lab_names = internal[["unit_ror", "laboratoire"]].drop_duplicates()
@@ -170,7 +172,7 @@ def lab_summary_table(pubs: pd.DataFrame, internal: pd.DataFrame | None) -> pd.D
     g["ror_url"] = g["lab_ror"].apply(lambda r: ROR_URL.format(ror=r))
     g["openalex_url"] = g["lab_ror"].apply(lambda r: OPENALEX_WORKS_FOR_ROR.format(ror=r))
 
-    g = g[["lab_name", "pubs_19_23", "share_among_lab_works", "avg_fwci", "lab_ror", "ror_url", "openalex_url"]]
+    g = g[["lab_name", "pubs_19_23", "share_of_dataset_works", "avg_fwci", "lab_ror", "ror_url", "openalex_url"]]
     g = g.sort_values("pubs_19_23", ascending=False)
     return g
 
