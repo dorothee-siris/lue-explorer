@@ -5,23 +5,27 @@ import pandas as pd
 import altair as alt
 
 from lib.constants import DOMAIN_COLORS
-from lib.transforms import map_field_to_domain, darken
+from lib.transforms import map_field_to_domain, darken, field_order
 
-# Altair for Streamlit: allow big tables
 alt.data_transformers.disable_max_rows()
-
 
 def _color_for_row(domain: str, in_lue: bool) -> str:
     base = DOMAIN_COLORS.get(domain, DOMAIN_COLORS["Other"])
     return darken(base, 0.7 if in_lue else 1.0)
-
 
 def field_mix_bars(
     df: pd.DataFrame,
     value_col: str = "count",
     percent: bool = False,
     height: int = 420,
+    xmax: float | None = None,
+    enforce_order_from: list[str] | None = None,
 ):
+    """
+    Horizontal stacked bars of field distribution, colored by domain.
+    Darker shade shows the In_LUE segment.
+    Expects columns: field, count, in_lue_count.
+    """
     if df.empty:
         return alt.Chart(pd.DataFrame({"field": [], "value": []})).mark_bar()
 
@@ -44,8 +48,10 @@ def field_mix_bars(
         d["value"] = d["value"] / totals
 
     d["color"] = d.apply(lambda r: _color_for_row(r["domain"], bool(r["is_lue"])), axis=1)
-    totals = d.groupby("field", as_index=False)["value"].sum().sort_values("value", ascending=True)
-    order = totals["field"].tolist()
+
+    # Fixed field order by domain → alphabetical
+    present_fields = d["field"].dropna().unique().tolist()
+    order = field_order(enforce_order_from or present_fields)
 
     tooltip = [
         alt.Tooltip("field:N", title="Field"),
@@ -54,23 +60,19 @@ def field_mix_bars(
         alt.Tooltip("value:Q", title=("Share" if percent else "Count"), format=(".0%" if percent else ",")),
     ]
 
-    # NOTE: Only set axis format when percent=True
-    x_enc = alt.X(
-        "value:Q",
-        title=("Share of works" if percent else "Works"),
-        axis=(alt.Axis(format="%") if percent else alt.Axis()),
-    )
+    # X axis: same domain for both charts if xmax provided; percent → [0,1]
+    x_axis = alt.Axis() if not percent else alt.Axis(format="%", tickCount=5)
+    x_scale = alt.Scale(domain=[0, 1]) if percent else (alt.Scale(domain=[0, xmax]) if xmax else alt.Scale())
 
     chart = (
         alt.Chart(d)
         .mark_bar()
         .encode(
-            y=alt.Y("field:N", sort=order, title=None),
-            x=x_enc,
+            y=alt.Y("field:N", sort=order, title=None, axis=alt.Axis(labelLimit=2000)),
+            x=alt.X("value:Q", title=("Share of works" if percent else "Works"), axis=x_axis, scale=x_scale),
             color=alt.Color("color:N", scale=None, legend=None),
             tooltip=tooltip,
         )
         .properties(height=height)
     )
     return chart
-
