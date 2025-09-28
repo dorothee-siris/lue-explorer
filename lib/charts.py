@@ -1,4 +1,3 @@
-# lib/charts.py
 from __future__ import annotations
 
 import pandas as pd
@@ -9,21 +8,25 @@ from lib.transforms import map_field_to_domain, darken, field_order
 
 alt.data_transformers.disable_max_rows()
 
+
 def _color_for_row(domain: str, in_lue: bool) -> str:
     base = DOMAIN_COLORS.get(domain, DOMAIN_COLORS["Other"])
     return darken(base, 0.7 if in_lue else 1.0)
+
 
 def field_mix_bars(
     df: pd.DataFrame,
     value_col: str = "count",
     percent: bool = False,
-    height: int = 420,
+    height_per_field: int = 24,
+    xmin: float | None = 0.0,
     xmax: float | None = None,
     enforce_order_from: list[str] | None = None,
+    show_y_labels: bool = True,
 ):
     """
     Horizontal stacked bars of field distribution, colored by domain.
-    Darker shade shows the In_LUE segment.
+    Darker shade shows the ISITE segment.
     Expects columns: field, count, in_lue_count.
     """
     if df.empty:
@@ -34,14 +37,16 @@ def field_mix_bars(
     d["in_lue_count"] = pd.to_numeric(d["in_lue_count"], errors="coerce").fillna(0).astype(int)
     d[value_col] = pd.to_numeric(d[value_col], errors="coerce").fillna(0)
 
-    d["not_lue_count"] = d[value_col] - d["in_lue_count"]
+    # Build segments with friendly names
+    d["Not ISITE"] = d[value_col] - d["in_lue_count"]
+    d["ISITE"] = d["in_lue_count"]
     d = d.melt(
         id_vars=["field", "domain"],
-        value_vars=["not_lue_count", "in_lue_count"],
+        value_vars=["Not ISITE", "ISITE"],
         var_name="segment",
         value_name="value",
     )
-    d["is_lue"] = d["segment"].eq("in_lue_count")
+    d["is_lue"] = d["segment"].eq("ISITE")
 
     if percent:
         totals = d.groupby("field")["value"].transform(lambda s: s.sum() if s.sum() else 1)
@@ -49,9 +54,23 @@ def field_mix_bars(
 
     d["color"] = d.apply(lambda r: _color_for_row(r["domain"], bool(r["is_lue"])), axis=1)
 
-    # Fixed field order by domain → alphabetical
+    # Fixed order by domain then alphabetical – include fields not present for this lab
     present_fields = d["field"].dropna().unique().tolist()
     order = field_order(enforce_order_from or present_fields)
+
+    # Dynamic height so every label is visible
+    chart_height = max(180, int(len(order) * height_per_field))
+
+    # X axis and scale
+    x_axis = (alt.Axis(format="%", tickCount=5) if percent else alt.Axis())
+    if percent:
+        x_scale = alt.Scale(domain=[0, 1])
+    else:
+        # Shared domain across charts if xmax provided
+        lo = 0 if xmin is None else xmin
+        x_scale = alt.Scale(domain=[lo, xmax] if xmax is not None else None)
+
+    y_axis = alt.Axis(labelLimit=2000, labels=show_y_labels, ticks=show_y_labels)
 
     tooltip = [
         alt.Tooltip("field:N", title="Field"),
@@ -60,19 +79,15 @@ def field_mix_bars(
         alt.Tooltip("value:Q", title=("Share" if percent else "Count"), format=(".0%" if percent else ",")),
     ]
 
-    # X axis: same domain for both charts if xmax provided; percent → [0,1]
-    x_axis = alt.Axis() if not percent else alt.Axis(format="%", tickCount=5)
-    x_scale = alt.Scale(domain=[0, 1]) if percent else (alt.Scale(domain=[0, xmax]) if xmax else alt.Scale())
-
     chart = (
         alt.Chart(d)
         .mark_bar()
         .encode(
-            y=alt.Y("field:N", sort=order, title=None, axis=alt.Axis(labelLimit=2000)),
+            y=alt.Y("field:N", sort=order, title=None, axis=y_axis),
             x=alt.X("value:Q", title=("Share of works" if percent else "Works"), axis=x_axis, scale=x_scale),
             color=alt.Color("color:N", scale=None, legend=None),
             tooltip=tooltip,
         )
-        .properties(height=height)
+        .properties(height=chart_height)
     )
     return chart

@@ -42,7 +42,52 @@ k4.metric("% covered by labs", f"{m['%_covered_by_labs']*100:.1f}%")
 
 st.divider()
 
-# ---- Year filter (applies to plots + OpenAlex link) --------------------------------
+# ---- Per-lab table (from dict_internal) --------------------------------------------
+st.subheader("Per-lab overview (2019–2023)")
+
+# Build table with current default 2019–2023 (links will refresh when year filter changes below)
+summary = lab_summary_table_from_internal(internal, year_min=YEAR_START, year_max=YEAR_END)
+
+# Prepare % for display as 0..100 while keeping comparisons relative to the top lab
+summary = summary.copy()
+summary["share_pct_display"] = summary["share_of_dataset_works"] * 100.0
+summary["lue_pct_display"] = summary["lue_pct"] * 100.0
+summary["intl_pct_display"] = summary["intl_pct"] * 100.0
+summary["company_pct_display"] = summary["company_pct"] * 100.0
+
+max_share = float(summary["share_pct_display"].max() or 1.0)
+max_lue = float(summary["lue_pct_display"].max() or 1.0)
+max_intl = float(summary["intl_pct_display"].max() or 1.0)
+max_comp = float(summary["company_pct_display"].max() or 1.0)
+
+# Show only the requested default columns; hide the rest by default
+st.dataframe(
+    summary,
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        "lab_name": st.column_config.TextColumn("Lab"),
+        "pubs_19_23": st.column_config.NumberColumn("Publications", format="%,d"),
+        "share_pct_display": st.column_config.ProgressColumn("% Université de Lorraine", format="%.1f %%", min_value=0.0, max_value=max_share),
+        "lue_pct_display": st.column_config.ProgressColumn("% of pubs LUE", format="%.1f %%", min_value=0.0, max_value=max_lue),
+        "intl_pct_display": st.column_config.ProgressColumn("% international", format="%.1f %%", min_value=0.0, max_value=max_intl),
+        "company_pct_display": st.column_config.ProgressColumn("% with company", format="%.1f %%", min_value=0.0, max_value=max_comp),
+
+        # hide by default
+        "avg_fwci": None,
+        "openalex_ui_url": None,  # too wide; user can toggle columns menu to show it
+        "ror_url": None,
+
+        # raw 0..1 ratio columns (not needed in UI)
+        "share_of_dataset_works": None,
+        "lue_pct": None,
+        "intl_pct": None,
+        "company_pct": None,
+    },
+)
+
+# ---- Year filter (applies to plots + rebuilds OpenAlex link) -----------------------
+st.markdown("### Year filter")
 years_all = list(range(YEAR_START, YEAR_END + 1))
 years_sel = st.multiselect("Filter years (affects the plots and OpenAlex links)", years_all, default=years_all)
 if not years_sel:
@@ -50,49 +95,15 @@ if not years_sel:
     st.stop()
 year_min, year_max = min(years_sel), max(years_sel)
 
-# ---- Per-lab table (from dict_internal) --------------------------------------------
-st.subheader("Per-lab overview (2019–2023)")
-
-summary = lab_summary_table_from_internal(internal, year_min=year_min, year_max=year_max)
-
-# Progress bars with max set to highest lab value (so the leader shows a full bar)
-max_share = float(summary["share_of_dataset_works"].max() or 1)
-max_lue = float(summary["lue_pct"].max() or 1)
-max_intl = float(summary["intl_pct"].max() or 1)
-max_comp = float(summary["company_pct"].max() or 1)
-
-st.dataframe(
-    summary.rename(columns={"openalex_ui_url": "openalex_ui"}),
-    use_container_width=True,
-    hide_index=True,
-    column_config={
-        "lab_name": st.column_config.TextColumn("Lab"),
-        "pubs_19_23": st.column_config.NumberColumn("Publications", format=","),
-
-        # bar max = highest lab so the top one is 'full'
-        "share_of_dataset_works": st.column_config.ProgressColumn(
-            "% of all publications (2019–2023)", format="%.1f%%", min_value=0.0, max_value=max_share
-        ),
-        "lue_pct": st.column_config.ProgressColumn("% LUE publications", format="%.1f%%", min_value=0.0, max_value=max_lue),
-        "intl_pct": st.column_config.ProgressColumn("% international", format="%.1f%%", min_value=0.0, max_value=max_intl),
-        "company_pct": st.column_config.ProgressColumn("% with company", format="%.1f%%", min_value=0.0, max_value=max_comp),
-
-        "avg_fwci": st.column_config.NumberColumn("Avg FWCI", format="%.2f"),
-        "openalex_ui": st.column_config.LinkColumn("Open in OpenAlex (UI)"),
-        "ror_url": st.column_config.LinkColumn("ROR page"),
-
-        # hide backend columns
-        "unit_ror": None,
-        "institution_id": None,
-    },
-)
+# Recompute the OpenAlex column with the selected years (kept hidden by default)
+summary_links = lab_summary_table_from_internal(internal, year_min=year_min, year_max=year_max)[["lab_name", "openalex_ui_url"]]
+summary = summary.drop(columns=["openalex_ui_url"]).merge(summary_links, on="lab_name", how="left")
 
 st.divider()
 
 # ---- Compare two labs ---------------------------------------------------------------
 st.subheader("Compare two labs")
 
-# Options from internal so we get clean names
 lab_options = internal[["laboratoire", "unit_ror"]].drop_duplicates().rename(
     columns={"laboratoire": "lab_name", "unit_ror": "lab_ror"}
 )
@@ -112,17 +123,21 @@ if not labels:
 left_ror = name_to_ror[left_label]
 right_ror = name_to_ror[right_label]
 
-# Precompute distributions for the selected years
+# Compute distributions for selected years
 lfc = lab_field_counts(pubs, years=years_sel)
 
-pL, pR = st.columns(2, gap="large")
 left_df = lfc[lfc["lab_ror"].eq(left_ror)].copy()
 right_df = lfc[lfc["lab_ror"].eq(right_ror)].copy()
+all_fields = list(lfc["field"].unique())
 
-# Shared xmax for volume chart (max field count across both labs)
+# Shared xmax for volume chart across both labs
 xmax = float(pd.concat([left_df["count"], right_df["count"]]).max() or 0)
 
-for side, title, df_lab in [(pL, left_label, left_df), (pR, right_label, right_df)]:
+pL, pR = st.columns(2, gap="large")
+for side, title, df_lab, show_labels in [
+    (pL, left_label, left_df, True),
+    (pR, right_label, right_df, False),  # hide y labels on the right to keep identical bar widths
+]:
     with side:
         st.markdown(f"### {title}")
         if df_lab.empty:
@@ -131,21 +146,35 @@ for side, title, df_lab in [(pL, left_label, left_df), (pR, right_label, right_d
 
         st.markdown("**Field distribution (volume)**")
         st.altair_chart(
-            field_mix_bars(df_lab, value_col="count", percent=False, xmax=xmax, enforce_order_from=list(lfc["field"].unique())),
+            field_mix_bars(
+                df_lab,
+                value_col="count",
+                percent=False,
+                xmax=xmax,
+                enforce_order_from=all_fields,
+                show_y_labels=show_labels,
+            ),
             use_container_width=True,
         )
 
         st.markdown("**Field distribution (% of lab works)**")
         st.altair_chart(
-            field_mix_bars(df_lab, value_col="count", percent=True, xmax=1.0, enforce_order_from=list(lfc["field"].unique())),
+            field_mix_bars(
+                df_lab,
+                value_col="count",
+                percent=True,
+                xmax=1.0,
+                enforce_order_from=all_fields,
+                show_y_labels=show_labels,
+            ),
             use_container_width=True,
         )
 
         total = int(df_lab["count"].sum())
-        lue = int(df_lab["in_lue_count"].sum())
+        lue = int(df_lab["ISITE".lower().replace("isite", "in_lue_count")].sum() if "in_lue_count" in df_lab.columns else 0)  # safety
         st.caption(
             f"Works counted across fields: {total:,}. "
-            f"In_LUE portions are shown in darker shades ({lue:,} field-assignments from In_LUE works)."
+            f"ISITE portions are shown in darker shades."
         )
 
 st.divider()

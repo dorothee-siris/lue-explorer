@@ -199,39 +199,46 @@ def lab_summary_table_from_internal(
     internal: pd.DataFrame, year_min: int, year_max: int
 ) -> pd.DataFrame:
     """
-    Build the per-lab table directly from dict_internal (as requested).
-    Columns:
-      lab_name, pubs_19_23, share_of_dataset_works, avg_fwci,
-      openalex_ui_url, ror_url, lab_ror, institution_id,
-      lue_pct, intl_pct, company_pct
+    Build the per-lab table directly from dict_internal.
+    Keeps numeric ratios in 0..1 for logic, and we'll create 0..100 display series in the page.
     """
     g = internal.copy()
 
     g["lab_name"] = g["laboratoire"]
-    g["pubs_19_23"] = pd.to_numeric(g["pubs_unique"], errors="coerce")
-    g["share_of_dataset_works"] = pd.to_numeric(g["share_ul"], errors="coerce")
+    g["pubs_19_23"] = (
+        pd.to_numeric(g["pubs_unique"], errors="coerce")
+        .fillna(0)
+        .astype(int)
+    )
+
+    # ratios in 0..1
+    g["share_of_dataset_works"] = pd.to_numeric(g["share_ul"], errors="coerce").fillna(0.0)
     g["avg_fwci"] = pd.to_numeric(g["avg_fwci"], errors="coerce")
-    g["lue_pct"] = (pd.to_numeric(g["dont_lue"], errors="coerce") / g["pubs_19_23"]).replace([float("inf")], 0).fillna(0)
-    g["intl_pct"] = pd.to_numeric(g["intl_ratio"], errors="coerce").fillna(0)
-    g["company_pct"] = pd.to_numeric(g["company_ratio"], errors="coerce").fillna(0)
+
+    # % LUE = dont_lue / pubs
+    pubs_nonzero = g["pubs_19_23"].replace(0, pd.NA)
+    g["lue_pct"] = (pd.to_numeric(g["dont_lue"], errors="coerce") / pubs_nonzero).fillna(0.0)
+
+    # international & company ratios already parsed in load_internal()
+    g["intl_pct"] = pd.to_numeric(g["intl_ratio"], errors="coerce").fillna(0.0)
+    g["company_pct"] = pd.to_numeric(g["company_ratio"], errors="coerce").fillna(0.0)
 
     g["ror_url"] = g["unit_ror"].apply(lambda r: ROR_URL.format(ror=r))
-    g["openalex_ui_url"] = g["institution_id"].apply(lambda iid: _openalex_ui_link(str(iid), year_min, year_max))
+    g["openalex_ui_url"] = g["institution_id"].apply(
+        lambda iid: _openalex_ui_link(str(iid), year_min, year_max)
+    )
 
-    # Order and choose columns (no ROR ID in UI)
     g = g[
         [
             "lab_name",
             "pubs_19_23",
             "share_of_dataset_works",
-            "avg_fwci",
-            "openalex_ui_url",
-            "ror_url",
-            "unit_ror",
-            "institution_id",
             "lue_pct",
             "intl_pct",
             "company_pct",
+            "avg_fwci",
+            "openalex_ui_url",
+            "ror_url",
         ]
     ].sort_values("pubs_19_23", ascending=False)
 
