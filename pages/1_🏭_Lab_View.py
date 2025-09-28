@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
+import altair as alt
 
 from lib.constants import YEAR_START, YEAR_END
 from lib.data_io import (
