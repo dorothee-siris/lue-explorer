@@ -1,6 +1,7 @@
 # pages/4_🤝_Partners_View.py
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 import altair as alt
@@ -21,7 +22,6 @@ from lib.data_io import (
 UL_ROR = "04vfs2w97"  # Université de Lorraine ROR (used for co-pub filters)
 
 st.set_page_config(page_title="Partners View — LUE Portfolio Explorer", page_icon="🤝", layout="wide")
-
 st.title("🤝 Partners View")
 st.caption("Explore external partners, their field profiles, and collaboration patterns with Université de Lorraine.")
 
@@ -34,66 +34,108 @@ with st.spinner("Loading data…"):
     partners = load_partners_ext()
 
 # ------------------------------------------------------------------------------------
-# High-level landscape
+# Landscape
 # ------------------------------------------------------------------------------------
 st.subheader("Landscape (2019–2023)")
 
 n_partners = len(partners)
-total_collab_pubs = int(pd.to_numeric(partners.get("pubs_partner_ul"), errors="coerce").fillna(0).sum())
 avg_partner_fwci = float(pd.to_numeric(partners.get("avg_fwci"), errors="coerce").mean() or 0.0)
 n_companies = int((partners.get("partner_type", pd.Series(dtype=str)).str.lower() == "company").sum())
 
-k1, k2, k3, k4 = st.columns(4)
-k1.metric("External partners (≥5 pubs)", f"{n_partners:,}")
-k2.metric("UL × partner co-publications (sum)", f"{total_collab_pubs:,}")
-k3.metric("Avg. FWCI across partners", f"{avg_partner_fwci:.2f}")
-k4.metric("Company partners", f"{n_companies:,}")
+m1, m3, m4 = st.columns(3)
+m1.metric("External partners (≥5 pubs)", f"{n_partners:,}")
+m3.metric("Avg. FWCI across partners", f"{avg_partner_fwci:.2f}")
+m4.metric("Company partners", f"{n_companies:,}")
 
-# Bubble: how “strategic” UL is for partners
-# x = relative_weight_to_total (UL share of the partner output), y = avg_fwci, size = pubs with UL, color = partner type
-p_bubble = partners.dropna(subset=["relative_weight_to_total", "avg_fwci"]).copy()
+# ------------------- Scatter (interactive) -------------------
+st.markdown("### Partner bubble map")
+
+# Controls
+c1, c2, c3, c4 = st.columns([1, 1, 1, 1.2])
+with c1:
+    scope = st.radio("Geo scope", ["All", "France only", "International only"], horizontal=True)
+with c2:
+    min_copubs_scatter = st.number_input("Min co-pubs (scatter)", min_value=0, max_value=2000, value=50, step=10)
+with c3:
+    size_scale_log = st.toggle("Log size", value=True, help="Use log1p(count) for bubble size.")
+with c4:
+    st.caption("Tip: click legend items to include/exclude partner types.")
+
+# Prepare data
+p_bubble = partners.copy()
 p_bubble["pubs_partner_ul"] = pd.to_numeric(p_bubble["pubs_partner_ul"], errors="coerce").fillna(0)
+p_bubble["relative_weight_to_total"] = pd.to_numeric(p_bubble["relative_weight_to_total"], errors="coerce").fillna(0)
+p_bubble["avg_fwci"] = pd.to_numeric(p_bubble["avg_fwci"], errors="coerce")
+
+# Scope filter
+if scope == "France only":
+    p_bubble = p_bubble[p_bubble["country"].str.upper() == "FR"]
+elif scope == "International only":
+    p_bubble = p_bubble[p_bubble["country"].str.upper() != "FR"]
+
+# Min co-pubs filter
+p_bubble = p_bubble[p_bubble["pubs_partner_ul"] >= min_copubs_scatter]
+
+# Size field (linear vs log)
+if size_scale_log:
+    p_bubble["pubs_partner_ul_log"] = np.log1p(p_bubble["pubs_partner_ul"])
+    size_field = "pubs_partner_ul_log"
+    size_title = "Co-pubs (log scale)"
+else:
+    size_field = "pubs_partner_ul"
+    size_title = "Co-pubs"
+
+# Legend-click selection
+sel_type = alt.selection_point(fields=["partner_type"], bind="legend")
 
 bubble = (
     alt.Chart(p_bubble)
-    .mark_circle(opacity=0.6)
+    .add_params(sel_type)
+    .transform_filter(sel_type)
+    .mark_circle(opacity=0.75)
     .encode(
-        x=alt.X("relative_weight_to_total:Q", title="UL share of partner output (2019–2023)", axis=alt.Axis(format="%")),
+        x=alt.X(
+            "relative_weight_to_total:Q",
+            title="Share of partner output (2019–2023)",
+            axis=alt.Axis(format="%"),
+            scale=alt.Scale(domain=[0, float(p_bubble['relative_weight_to_total'].max() or 1.0)])
+        ),
         y=alt.Y("avg_fwci:Q", title="Avg. FWCI (UL × partner)"),
-        size=alt.Size("pubs_partner_ul:Q", title="Co-publications (count)", scale=alt.Scale(range=[10, 1200])),
-        color=alt.Color("partner_type:N", title="Type"),
+        size=alt.Size(f"{size_field}:Q", title=size_title, scale=alt.Scale(range=[10, 1200])),
+        color=alt.Color("partner_type:N", title="Partner type"),
         tooltip=[
             alt.Tooltip("partner_name:N", title="Partner"),
             alt.Tooltip("partner_type:N", title="Type"),
             alt.Tooltip("country:N", title="Country"),
             alt.Tooltip("pubs_partner_ul:Q", title="Co-pubs", format=","),
-            alt.Tooltip("relative_weight_to_total:Q", title="UL share", format=".1%"),
+            alt.Tooltip("relative_weight_to_total:Q", title="Share of partner output", format=".1%"),
             alt.Tooltip("avg_fwci:Q", title="Avg. FWCI", format=".2f"),
         ],
     )
-    .properties(height=360)
+    .properties(height=380)
 )
 st.altair_chart(bubble, use_container_width=True)
 
 # Ranked table with quick filters
 st.markdown("### Top partners")
-c1, c2, c3 = st.columns(3)
-with c1:
+
+t1, t2, t3 = st.columns(3)
+with t1:
     type_filter = st.selectbox("Filter by type", ["(all)"] + sorted(partners["partner_type"].dropna().unique().tolist()))
-with c2:
+with t2:
     country_filter = st.selectbox("Filter by country", ["(all)"] + sorted(partners["country"].dropna().unique().tolist()))
-with c3:
-    min_pubs = st.number_input("Min co-publications", min_value=5, max_value=1000, value=5, step=1)
+with t3:
+    min_pubs_table = st.number_input("Min co-publications (table)", min_value=5, max_value=2000, value=100, step=5)
 
 ptab = partners.copy()
 if type_filter != "(all)":
     ptab = ptab[ptab["partner_type"].eq(type_filter)]
 if country_filter != "(all)":
     ptab = ptab[ptab["country"].eq(country_filter)]
-ptab = ptab[pd.to_numeric(ptab["pubs_partner_ul"], errors="coerce").fillna(0).ge(min_pubs)]
+ptab = ptab[pd.to_numeric(ptab["pubs_partner_ul"], errors="coerce").fillna(0).ge(min_pubs_table)]
 
-ptab["ul_share_display"] = ptab["share_of_ul"] * 100.0
-ptab["rel_weight_display"] = ptab["relative_weight_to_total"] * 100.0
+ptab["ul_share_display"] = pd.to_numeric(ptab["share_of_ul"], errors="coerce").fillna(0) * 100.0
+ptab["rel_weight_display"] = pd.to_numeric(ptab["relative_weight_to_total"], errors="coerce").fillna(0) * 100.0
 
 st.dataframe(
     ptab.sort_values(["pubs_partner_ul", "avg_fwci"], ascending=[False, False])[
@@ -107,20 +149,22 @@ st.dataframe(
         "country": st.column_config.TextColumn("Country"),
         "pubs_partner_ul": st.column_config.NumberColumn("Co-pubs", format="%.0f"),
         "avg_fwci": st.column_config.NumberColumn("Avg. FWCI", format="%.2f"),
-        "ul_share_display": st.column_config.ProgressColumn("% of UL output", format="%.1f %%", min_value=0.0, max_value=float(ptab["ul_share_display"].max() or 1.0)),
+        "ul_share_display": st.column_config.ProgressColumn("% of UL output", format="%.1f %%",
+            min_value=0.0, max_value=float(ptab["ul_share_display"].max() or 1.0)),
         "partner_total_works": st.column_config.NumberColumn("Partner total works (19–23)", format="%.0f"),
-        "rel_weight_display": st.column_config.ProgressColumn("UL share of partner output", format="%.1f %%", min_value=0.0, max_value=float(ptab["rel_weight_display"].max() or 1.0)),
+        # renamed column here ↓
+        "rel_weight_display": st.column_config.ProgressColumn("Share of partner output", format="%.1f %%",
+            min_value=0.0, max_value=float(ptab["rel_weight_display"].max() or 1.0)),
     },
 )
 
 st.divider()
 
 # ------------------------------------------------------------------------------------
-# Compare UL vs a selected partner (field mix, side-by-side)
+# Compare a partner to Université de Lorraine (field mix)
 # ------------------------------------------------------------------------------------
 st.subheader("Compare a partner to Université de Lorraine")
 
-# Large list -> live-search selector
 query = st.text_input("Search partner (type a few letters of the name/country/type)", "")
 candidates = partners.copy()
 if query.strip():
@@ -130,27 +174,24 @@ if query.strip():
         | candidates["country"].str.lower().str.contains(q, na=False)
         | candidates["partner_type"].str.lower().str.contains(q, na=False)
     ]
-candidates = candidates.sort_values("pubs_partner_ul", ascending=False).head(50)  # cap to keep menu short
+candidates = candidates.sort_values("pubs_partner_ul", ascending=False).head(50)
 
 if candidates.empty:
     st.info("Type a few characters to find a partner.")
 else:
-    labellist = [f"{r.partner_name} — {r.partner_type}, {r.country}" for _, r in candidates.iterrows()]
-    idx = st.selectbox("Pick a partner", options=list(range(len(labellist))), format_func=lambda i: labellist[i])
-    partner_row = candidates.iloc[idx]
+    labels = [f"{r.partner_name} — {r.partner_type}, {r.country}" for _, r in candidates.iterrows()]
+    pick = st.selectbox("Pick a partner", options=list(range(len(labels))), format_func=lambda i: labels[i])
+    partner_row = candidates.iloc[pick]
 
-    # Parse partner field counts
-    partner_fields = explode_field_details(partner_row.get("fields_details"), "count", "fwci", a_is_int=True)
-    partner_fields = partner_fields[["field", "count"]]
+    # Partner field mix (count) from the compact string
+    partner_fields = explode_field_details(partner_row.get("fields_details"), "count", "fwci", a_is_int=True)[["field", "count"]]
 
-    # UL field counts
+    # UL field mix (count) using the robust helper (fixes your KeyError)
     ul_fields = ul_field_counts_from_internal(internal, prefer="institution_ROR")
 
-    # Field catalogue for consistent order
     catalogue = all_fields_order()
-
-    cL, cR = st.columns(2, gap="large")
-    with cL:
+    left, right = st.columns(2, gap="large")
+    with left:
         st.markdown(f"### {partner_row['partner_name']}")
         st.altair_chart(
             simple_field_bars(partner_fields, value_col="count", percent=False,
@@ -162,7 +203,7 @@ else:
                               enforce_order_from=catalogue, show_counts=False, width=560),
             use_container_width=True,
         )
-    with cR:
+    with right:
         st.markdown("### Université de Lorraine")
         st.altair_chart(
             simple_field_bars(ul_fields, value_col="count", percent=False,
@@ -184,7 +225,6 @@ else:
     inst_ror = partner_row.get("inst_ror")
     inst_id = partner_row.get("inst_id")
 
-    # Compute co-publications from pubs_final by exploding the institution lists
     e = explode_institutions(pubs)
     mask_partner = False
     if pd.notna(inst_ror) and str(inst_ror).strip():
@@ -192,12 +232,10 @@ else:
     if pd.notna(inst_id) and str(inst_id).strip():
         mask_partner = mask_partner | (e["inst_id"] == str(inst_id).strip())
 
-    # Keep only works where UL ROR also appears
     ids_with_partner = set(e.loc[mask_partner, "openalex_id"])
     ids_with_ul = set(e.loc[e["inst_ror"] == UL_ROR, "openalex_id"])
     collab_ids = ids_with_partner.intersection(ids_with_ul)
 
-    # Year filter (same pattern as Lab View)
     years_all = list(range(YEAR_START, YEAR_END + 1))
     years_sel = st.multiselect("Filter years for the collaboration section", years_all, default=years_all, key="years_partner")
     collab = pubs[(pubs["OpenAlex ID"].isin(collab_ids)) & (pubs["Publication Year"].isin(years_sel))].copy()
@@ -210,7 +248,6 @@ else:
         lue_pct = (lue_count / total) if total else 0.0
         avg_fwci = float(pd.to_numeric(collab.get("Field-Weighted Citation Impact"), errors="coerce").mean() or 0.0)
 
-        # International / company flags computed at publication level
         def _has_non_fr(c):
             if c is None: return False
             toks = [t.strip().upper() for t in str(c).replace(";", "|").split("|") if t.strip()]
@@ -233,7 +270,6 @@ else:
         t4.metric("% international", f"{intl_pct*100:.1f}%")
         t5.metric("% with company", f"{comp_pct*100:.1f}%")
 
-        # Stacked doc-types by year (5 bars)
         type_col = "Publication Type"
         cop = collab.copy()
         cop["doc_type"] = cop[type_col].str.lower().map({
@@ -259,9 +295,8 @@ else:
         )
         st.altair_chart(chart, use_container_width=True)
 
-        # Co-publications table (top 100 by citations by default)
-        detail_cols = []
-        rename_out = {}
+        # Co-publications table (top 100 by default)
+        cols, rename_out = [], {}
         wanted = [
             ("OpenAlex ID", "OpenAlex ID"),
             ("DOI", "DOI"),
@@ -278,10 +313,9 @@ else:
         ]
         for c_in, c_out in wanted:
             if c_in in collab.columns:
-                detail_cols.append(c_in)
-                rename_out[c_in] = c_out
+                cols.append(c_in); rename_out[c_in] = c_out
 
-        detail = collab[detail_cols].rename(columns=rename_out).drop_duplicates()
+        detail = collab[cols].rename(columns=rename_out).drop_duplicates()
         detail = detail.sort_values(["Citation Count", "Field-Weighted Citation Impact"], ascending=[False, False])
 
         show_all = st.toggle("Show full list (may be long)", value=False)
@@ -299,7 +333,7 @@ else:
 st.divider()
 
 # ------------------------------------------------------------------------------------
-# Focus: companies
+# Focus on companies
 # ------------------------------------------------------------------------------------
 st.subheader("Focus on companies")
 
@@ -309,9 +343,9 @@ if companies.empty:
 else:
     comp_bubble = (
         alt.Chart(companies)
-        .mark_circle(opacity=0.7)
+        .mark_circle(opacity=0.75)
         .encode(
-            x=alt.X("relative_weight_to_total:Q", title="UL share of company output", axis=alt.Axis(format="%")),
+            x=alt.X("relative_weight_to_total:Q", title="Share of partner output", axis=alt.Axis(format="%")),
             y=alt.Y("avg_fwci:Q", title="Avg. FWCI (UL × company)"),
             size=alt.Size("pubs_partner_ul:Q", title="Co-pubs", scale=alt.Scale(range=[10, 1200])),
             color=alt.Color("country:N", title="Country"),
@@ -319,7 +353,7 @@ else:
                 alt.Tooltip("partner_name:N", title="Company"),
                 alt.Tooltip("country:N", title="Country"),
                 alt.Tooltip("pubs_partner_ul:Q", title="Co-pubs", format=","),
-                alt.Tooltip("relative_weight_to_total:Q", title="UL share", format=".1%"),
+                alt.Tooltip("relative_weight_to_total:Q", title="Share of partner output", format=".1%"),
                 alt.Tooltip("avg_fwci:Q", title="Avg. FWCI", format=".2f"),
             ],
         )
@@ -340,7 +374,8 @@ else:
             "pubs_partner_ul": st.column_config.NumberColumn("Co-pubs", format="%.0f"),
             "avg_fwci": st.column_config.NumberColumn("Avg. FWCI", format="%.2f"),
             "partner_total_works": st.column_config.NumberColumn("Company total works (19–23)", format="%.0f"),
-            "relative_weight_to_total": st.column_config.ProgressColumn("UL share of company output", format="%.1f %%", min_value=0.0, max_value=float((companies["relative_weight_to_total"]*100).max() or 1.0)),
+            "relative_weight_to_total": st.column_config.ProgressColumn("Share of partner output", format="%.1f %%",
+                min_value=0.0, max_value=float((companies["relative_weight_to_total"]*100).max() or 1.0)),
         },
     )
 

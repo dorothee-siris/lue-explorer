@@ -493,27 +493,41 @@ def explode_field_details(s: str, value_a: str, value_b: str, a_is_int: bool = T
 @st.cache_data(show_spinner=False)
 def ul_field_counts_from_internal(internal: pd.DataFrame, prefer: str = "institution_ROR") -> pd.DataFrame:
     """
-    Return UL's overall field mix as counts.
-    prefer: "institution_ROR" (default) or "institution_full"
+    Return UL's overall field mix as counts using dict_internal.
+    Strategy:
+      1) Prefer the row where 'structure type' == prefer (default 'institution_ROR').
+      2) Fallback to 'structure type' == 'institution_full'.
+      3) As last resort, pick the first row that has a non-empty 'Fields distribution (count ; FWCI)'.
     """
     df = internal.copy()
+
+    # Normalize column names once
+    lowmap = {c.lower(): c for c in df.columns}
+    col_struct = lowmap.get("structure type")
+    col_fields = lowmap.get("fields distribution (count ; fwci)")
+
+    if col_fields is None:
+        # Can't parse without the field string
+        return pd.DataFrame(columns=["field", "count"])
+
     row = None
-    if "structure type" in df.columns:
-        cand = df[df["structure type"].eq(prefer)]
-        if cand.empty:  # fallback
-            cand = df[df["structure type"].eq("institution_full")]
+    if col_struct is not None:
+        cand = df[df[col_struct].eq(prefer)]
+        if cand.empty:
+            cand = df[df[col_struct].eq("institution_full")]
         if not cand.empty:
             row = cand.iloc[0]
+
     if row is None:
-        # try best-effort by name
-        for key in ["Université de Lorraine", "Université de Lorraine (full dataset)"]:
-            cand = df[df["Laboratoire"].eq(key)]
-            if not cand.empty:
-                row = cand.iloc[0]
-                break
+        # last resort: first row that actually has the fields string
+        nonempty = df[df[col_fields].astype(str).str.strip().ne("")]
+        if not nonempty.empty:
+            row = nonempty.iloc[0]
+
     if row is None:
         return pd.DataFrame(columns=["field", "count"])
 
-    fields_s = row.get("Fields distribution (count ; FWCI)", None)
+    fields_s = row.get(col_fields, None)
     out = explode_field_details(fields_s, "count", "fwci", a_is_int=True)
     return out[["field", "count"]]
+
