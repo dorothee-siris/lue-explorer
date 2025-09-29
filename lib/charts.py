@@ -105,3 +105,61 @@ def field_mix_bars(
         chart = chart.properties(width=width)
 
     return chart
+
+def simple_field_bars(
+    df: pd.DataFrame,
+    value_col: str = "count",
+    percent: bool = False,
+    enforce_order_from: list[str] | None = None,
+    show_counts: bool = True,
+    width: int | None = 560,
+    height_per_field: int = 18,
+):
+    """
+    One-segment horizontal bars by field (colored by domain), optional % mode.
+    Prints the integer count next to the y-label (using a text layer).
+    Expects columns: field, value_col
+    """
+    if df is None or df.empty:
+        return alt.Chart(pd.DataFrame({"field": [], value_col: []})).mark_bar()
+
+    d = df.copy()
+    d["domain"] = d["field"].map(map_field_to_domain)
+    d[value_col] = pd.to_numeric(d[value_col], errors="coerce").fillna(0)
+
+    if percent:
+        total = float(d[value_col].sum() or 1.0)
+        d["value"] = d[value_col] / total
+    else:
+        d["value"] = d[value_col]
+
+    all_fields = enforce_order_from or sorted(d["field"].unique().tolist())
+    order = field_order(all_fields)
+    h = max(220, int(len(order) * height_per_field))
+
+    base = alt.Chart(d)
+
+    bar = base.mark_bar().encode(
+        y=alt.Y("field:N", sort=order, title=None, axis=alt.Axis(labelLimit=9999, labelPadding=2, labelFontSize=11)),
+        x=alt.X("value:Q", title=("Share of works" if percent else "Works"),
+                scale=alt.Scale(domain=[0, 1]) if percent else alt.Undefined,
+                axis=alt.Axis(format="%" if percent else None)),
+        color=alt.Color("domain:N", legend=None,
+                        scale=alt.Scale(domain=list(DOMAIN_COLORS), range=[DOMAIN_COLORS[k] for k in DOMAIN_COLORS])),
+        tooltip=[alt.Tooltip("field:N"), alt.Tooltip("domain:N"),
+                 alt.Tooltip("value:Q", title=("Share" if percent else "Count"),
+                             format=(".0%" if percent else ","))],
+    )
+
+    layers = [bar]
+
+    if show_counts and not percent:
+        text = base.mark_text(align="left", baseline="middle", dx=6).encode(
+            y=alt.Y("field:N", sort=order, title=None),
+            x=alt.value(0),
+            text=alt.Text(f"{value_col}:Q", format=","),
+        )
+        layers.append(text)
+
+    chart = alt.layer(*layers).properties(height=h, width=width, padding={"left": 90, "right": 6, "top": 2, "bottom": 4})
+    return chart

@@ -359,3 +359,161 @@ def load_authors_lookup(data_path: str | None = None) -> pd.DataFrame | None:
     }
     df = df.rename(columns=mapping)
     return df
+
+# --- Partners: loader + parsing -----------------------------------------------------
+import re
+import json
+from typing import Iterable
+
+@st.cache_data(show_spinner=False)
+def load_partners_ext(data_path: str | None = None) -> pd.DataFrame:
+    """
+    Load dict_partners_ext.parquet and normalize columns.
+    """
+    df = load_parquet("dict_partners_ext.parquet", data_path)
+    rename = {
+        "Institution Name": "partner_name",
+        "Institution Type": "partner_type",
+        "Country Name": "country",
+        "Institutions ID": "inst_id",
+        "Institutions ROR": "inst_ror",
+
+        "Publications (unique)": "pubs_partner_ul",
+        "dont LUE": "lue_count",
+        "Average FWCI": "avg_fwci",
+        "% of UL production": "share_of_ul",  # 0..1
+
+        "Labs collaborating (count)": "labs_collab_count",
+        "Labs collaborating (details)": "labs_collab_details",
+
+        "Fields distribution (count ; FWCI)": "fields_details",
+
+        "total_works_2019_23_articles_books_chapters_reviews": "partner_total_works",
+        "fields_all_count_ratio": "fields_all_count_ratio",  # "Field (count ; ratio)"
+        "relative_weight_to_total": "relative_weight_to_total",  # pubs_partner_ul / partner_total_works
+        "field_relative_ratios": "field_relative_ratios",
+    }
+    df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
+
+    for c in ["pubs_partner_ul", "lue_count", "avg_fwci", "share_of_ul",
+              "partner_total_works", "relative_weight_to_total"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    return df
+
+
+def _split_positions(s: str) -> list[str]:
+    """Utility: remove [idx] prefixes, split by | and ;, and trim."""
+    if s is None or pd.isna(s):
+        return []
+    raw = str(s)
+    # Normalize delimiters
+    raw = raw.replace(" ;", "|").replace("; ", "|").replace(";", "|")
+    # Drop position markers like [1]
+    raw = re.sub(r"\[\d+\]\s*", "", raw)
+    toks = [t.strip() for t in raw.split("|")]
+    return [t for t in toks if t]
+
+
+@st.cache_data(show_spinner=False)
+def explode_institutions(pubs: pd.DataFrame) -> pd.DataFrame:
+    """
+    Explode Institutions ID / ROR / Type / Country to one row per (work, institution).
+    Returns: columns = openalex_id, inst_id, inst_ror, inst_type, inst_country, year, fwci, in_lue
+    """
+    cols = {
+        "OpenAlex ID": "openalex_id",
+        "Institutions ID": "inst_ids_raw",
+        "Institutions ROR": "inst_rors_raw",
+        "Institution Types": "inst_types_raw",
+        "Institution Countries": "inst_countries_raw",
+        "Publication Year": "year",
+        "Field-Weighted Citation Impact": "fwci",
+        "In_LUE": "in_lue",
+    }
+    df = pubs.rename(columns={k: v for k, v in cols.items() if k in pubs.columns}).copy()
+
+    rows = []
+    for _, r in df[["openalex_id", "inst_ids_raw", "inst_rors_raw", "inst_types_raw",
+                    "inst_countries_raw", "year", "fwci", "in_lue"]].iterrows():
+        ids = _split_positions(r["inst_ids_raw"])
+        rors = _split_positions(r["inst_rors_raw"])
+        tys = _split_positions(r["inst_types_raw"])
+        ctys = _split_positions(r["inst_countries_raw"])
+
+        # pad to max length
+        L = max(len(ids), len(rors), len(tys), len(ctys), 1)
+        ids += [""] * (L - len(ids))
+        rors += [""] * (L - len(rors))
+        tys += [""] * (L - len(tys))
+        ctys += [""] * (L - len(ctys))
+
+        for i in range(L):
+            rows.append({
+                "openalex_id": r["openalex_id"],
+                "inst_id": ids[i] or None,
+                "inst_ror": rors[i] or None,
+                "inst_type": tys[i] or None,
+                "inst_country": ctys[i] or None,
+                "year": r["year"],
+                "fwci": r["fwci"],
+                "in_lue": bool(r.get("in_lue", False)),
+            })
+    out = pd.DataFrame(rows)
+    return out
+
+
+def explode_field_details(s: str, value_a: str, value_b: str, a_is_int: bool = True) -> pd.DataFrame:
+    """
+    Parse strings like:  "Field A (123 ; 1.46) | Field B (45 ; 0.92)"
+    Returns DataFrame[field, <value_a>, <value_b>]
+    """
+    rows = []
+    if s is None or pd.isna(s) or not str(s).strip():
+        return pd.DataFrame(columns=["field", value_a, value_b])
+    for tok in str(s).split("|"):
+        tok = tok.strip()
+        if not tok:
+            continue
+        # split 'Name (' and 'count ; val)'
+        if "(" in tok:
+            name, rest = tok.split("(", 1)
+            name = name.strip()
+            rest = rest.rstrip(")")
+            parts = [p.strip() for p in rest.split(";")]
+            a = pd.to_numeric(parts[0].replace(",", "."), errors="coerce")
+            b = pd.to_numeric(parts[1].replace(",", "."), errors="coerce") if len(parts) > 1 else None
+            if a_is_int:
+                a = int(a) if pd.notna(a) else 0
+            rows.append({"field": name, value_a: a, value_b: b})
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(show_spinner=False)
+def ul_field_counts_from_internal(internal: pd.DataFrame, prefer: str = "institution_ROR") -> pd.DataFrame:
+    """
+    Return UL's overall field mix as counts.
+    prefer: "institution_ROR" (default) or "institution_full"
+    """
+    df = internal.copy()
+    row = None
+    if "structure type" in df.columns:
+        cand = df[df["structure type"].eq(prefer)]
+        if cand.empty:  # fallback
+            cand = df[df["structure type"].eq("institution_full")]
+        if not cand.empty:
+            row = cand.iloc[0]
+    if row is None:
+        # try best-effort by name
+        for key in ["Université de Lorraine", "Université de Lorraine (full dataset)"]:
+            cand = df[df["Laboratoire"].eq(key)]
+            if not cand.empty:
+                row = cand.iloc[0]
+                break
+    if row is None:
+        return pd.DataFrame(columns=["field", "count"])
+
+    fields_s = row.get("Fields distribution (count ; FWCI)", None)
+    out = explode_field_details(fields_s, "count", "fwci", a_is_int=True)
+    return out[["field", "count"]]
