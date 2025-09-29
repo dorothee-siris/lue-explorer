@@ -64,57 +64,71 @@ with c4:
 # Prepare data
 p_bubble = partners.copy()
 p_bubble["pubs_partner_ul"] = pd.to_numeric(p_bubble["pubs_partner_ul"], errors="coerce").fillna(0)
-p_bubble["relative_weight_to_total"] = pd.to_numeric(p_bubble["relative_weight_to_total"], errors="coerce").fillna(0)
+p_bubble["relative_weight_to_total"] = pd.to_numeric(p_bubble["relative_weight_to_total"], errors="coerce")
 p_bubble["avg_fwci"] = pd.to_numeric(p_bubble["avg_fwci"], errors="coerce")
 
 # Scope filter
+cc = p_bubble.get("country")
 if scope == "France only":
-    p_bubble = p_bubble[p_bubble["country"].str.upper() == "FR"]
+    p_bubble = p_bubble[cc.str.upper().eq("FR")]
 elif scope == "International only":
-    p_bubble = p_bubble[p_bubble["country"].str.upper() != "FR"]
+    p_bubble = p_bubble[cc.str.upper().ne("FR")]
 
 # Min co-pubs filter
 p_bubble = p_bubble[p_bubble["pubs_partner_ul"] >= min_copubs_scatter]
 
-# Size field (linear vs log)
-if size_scale_log:
-    p_bubble["pubs_partner_ul_log"] = np.log1p(p_bubble["pubs_partner_ul"])
-    size_field = "pubs_partner_ul_log"
-    size_title = "Co-pubs (log scale)"
+# Drop rows without the axes
+p_bubble = p_bubble.dropna(subset=["relative_weight_to_total", "avg_fwci"])
+
+if p_bubble.empty:
+    st.info("No partners match your filters. Loosen the filters (scope or min co-pubs).")
 else:
-    size_field = "pubs_partner_ul"
-    size_title = "Co-pubs"
+    # Size field (linear vs log)
+    if size_scale_log:
+        p_bubble["pubs_partner_ul_log"] = np.log1p(p_bubble["pubs_partner_ul"])
+        size_field = "pubs_partner_ul_log"
+        size_title = "Co-pubs (log scale)"
+    else:
+        size_field = "pubs_partner_ul"
+        size_title = "Co-pubs"
 
-# Legend-click selection
-sel_type = alt.selection_point(fields=["partner_type"], bind="legend")
+    # Safe x-domain
+    xmax = p_bubble["relative_weight_to_total"].max()
+    if not np.isfinite(xmax) or xmax <= 0:
+        x_scale = alt.Scale(domain=[0, 1])
+    else:
+        x_scale = alt.Scale(domain=[0, float(xmax)])
 
-bubble = (
-    alt.Chart(p_bubble)
-    .add_params(sel_type)
-    .transform_filter(sel_type)
-    .mark_circle(opacity=0.75)
-    .encode(
-        x=alt.X(
-            "relative_weight_to_total:Q",
-            title="Share of partner output (2019–2023)",
-            axis=alt.Axis(format="%"),
-            scale=alt.Scale(domain=[0, float(p_bubble['relative_weight_to_total'].max() or 1.0)])
-        ),
-        y=alt.Y("avg_fwci:Q", title="Avg. FWCI (UL × partner)"),
-        size=alt.Size(f"{size_field}:Q", title=size_title, scale=alt.Scale(range=[10, 1200])),
-        color=alt.Color("partner_type:N", title="Partner type"),
-        tooltip=[
-            alt.Tooltip("partner_name:N", title="Partner"),
-            alt.Tooltip("partner_type:N", title="Type"),
-            alt.Tooltip("country:N", title="Country"),
-            alt.Tooltip("pubs_partner_ul:Q", title="Co-pubs", format=","),
-            alt.Tooltip("relative_weight_to_total:Q", title="Share of partner output", format=".1%"),
-            alt.Tooltip("avg_fwci:Q", title="Avg. FWCI", format=".2f"),
-        ],
+    # Legend-click selection
+    sel_type = alt.selection_point(fields=["partner_type"], bind="legend")
+
+    bubble = (
+        alt.Chart(p_bubble)
+        .add_params(sel_type)
+        .transform_filter(sel_type)
+        .mark_circle(opacity=0.75)
+        .encode(
+            x=alt.X(
+                "relative_weight_to_total:Q",
+                title="Share of partner output (2019–2023)",
+                axis=alt.Axis(format="%"),
+                scale=x_scale,
+            ),
+            y=alt.Y("avg_fwci:Q", title="Avg. FWCI (UL × partner)"),
+            size=alt.Size(f"{size_field}:Q", title=size_title, scale=alt.Scale(range=[10, 1200])),
+            color=alt.Color("partner_type:N", title="Partner type"),
+            tooltip=[
+                alt.Tooltip("partner_name:N", title="Partner"),
+                alt.Tooltip("partner_type:N", title="Type"),
+                alt.Tooltip("country:N", title="Country"),
+                alt.Tooltip("pubs_partner_ul:Q", title="Co-pubs", format=","),
+                alt.Tooltip("relative_weight_to_total:Q", title="Share of partner output", format=".1%"),
+                alt.Tooltip("avg_fwci:Q", title="Avg. FWCI", format=".2f"),
+            ],
+        )
+        .properties(height=380)
     )
-    .properties(height=380)
-)
-st.altair_chart(bubble, use_container_width=True)
+    st.altair_chart(bubble, use_container_width=True)
 
 # Ranked table with quick filters
 st.markdown("### Top partners")

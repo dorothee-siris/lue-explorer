@@ -117,49 +117,68 @@ def simple_field_bars(
 ):
     """
     One-segment horizontal bars by field (colored by domain), optional % mode.
-    Prints the integer count next to the y-label (using a text layer).
-    Expects columns: field, value_col
+    Prints the integer count next to the y-label (volume only).
+    Ensures every field in `enforce_order_from` is shown (zeros if missing).
     """
-    if df is None or df.empty:
-        return alt.Chart(pd.DataFrame({"field": [], value_col: []})).mark_bar()
+    if df is None:
+        df = pd.DataFrame(columns=["field", value_col])
 
     d = df.copy()
-    d["domain"] = d["field"].map(map_field_to_domain)
-    d[value_col] = pd.to_numeric(d[value_col], errors="coerce").fillna(0)
+    d["field"] = d.get("field")
+    d[value_col] = pd.to_numeric(d.get(value_col, 0), errors="coerce").fillna(0)
 
+    # Full field list and domain mapping
+    fields_full = enforce_order_from or sorted(d["field"].dropna().unique().tolist())
+    base = pd.DataFrame({"field": fields_full})
+    base["domain"] = base["field"].map(map_field_to_domain)
+
+    # merge so missing fields exist with zeros
+    d = base.merge(d[["field", value_col]], on="field", how="left")
+    d[value_col] = d[value_col].fillna(0)
+
+    # compute value / percent
     if percent:
         total = float(d[value_col].sum() or 1.0)
         d["value"] = d[value_col] / total
     else:
         d["value"] = d[value_col]
 
-    all_fields = enforce_order_from or sorted(d["field"].unique().tolist())
-    order = field_order(all_fields)
+    # fixed order + size
+    order = field_order(fields_full)
     h = max(220, int(len(order) * height_per_field))
 
-    base = alt.Chart(d)
+    # axes
+    x_axis = alt.Axis(format="%", tickCount=5) if percent else alt.Axis()
+    x_scale = alt.Scale(domain=[0, 1]) if percent else alt.Undefined
+    y_axis = alt.Axis(labelLimit=9999, labelPadding=2, labelFontSize=11)
+    y_scale = alt.Scale(domain=order)  # force all labels
 
-    bar = base.mark_bar().encode(
-        y=alt.Y("field:N", sort=order, title=None, axis=alt.Axis(labelLimit=9999, labelPadding=2, labelFontSize=11)),
+    base_ch = alt.Chart(d)
+    bar = base_ch.mark_bar().encode(
+        y=alt.Y("field:N", scale=y_scale, title=None, axis=y_axis),
         x=alt.X("value:Q", title=("Share of works" if percent else "Works"),
-                scale=alt.Scale(domain=[0, 1]) if percent else alt.Undefined,
-                axis=alt.Axis(format="%" if percent else None)),
+                scale=x_scale, axis=x_axis),
         color=alt.Color("domain:N", legend=None,
-                        scale=alt.Scale(domain=list(DOMAIN_COLORS), range=[DOMAIN_COLORS[k] for k in DOMAIN_COLORS])),
-        tooltip=[alt.Tooltip("field:N"), alt.Tooltip("domain:N"),
-                 alt.Tooltip("value:Q", title=("Share" if percent else "Count"),
-                             format=(".0%" if percent else ","))],
+                        scale=alt.Scale(domain=list(DOMAIN_COLORS),
+                                        range=[DOMAIN_COLORS[k] for k in DOMAIN_COLORS])),
+        tooltip=[
+            alt.Tooltip("field:N", title="Field"),
+            alt.Tooltip("domain:N", title="Domain"),
+            alt.Tooltip("value:Q", title=("Share" if percent else "Count"),
+                        format=(".0%" if percent else ",")),
+        ],
     )
 
     layers = [bar]
-
     if show_counts and not percent:
-        text = base.mark_text(align="left", baseline="middle", dx=6).encode(
-            y=alt.Y("field:N", sort=order, title=None),
+        txt = base_ch.mark_text(align="left", baseline="middle", dx=6).encode(
+            y=alt.Y("field:N", scale=y_scale, title=None),
             x=alt.value(0),
             text=alt.Text(f"{value_col}:Q", format=","),
         )
-        layers.append(text)
+        layers.append(txt)
 
-    chart = alt.layer(*layers).properties(height=h, width=width, padding={"left": 90, "right": 6, "top": 2, "bottom": 4})
-    return chart
+    return alt.layer(*layers).properties(
+        height=h, width=width, padding={"left": 80, "right": 6, "top": 2, "bottom": 4}
+    )
+
