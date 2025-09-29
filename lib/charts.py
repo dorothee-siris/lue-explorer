@@ -1,42 +1,52 @@
-# lib/charts.py
 from __future__ import annotations
 import pandas as pd
 import altair as alt
+
 from lib.constants import DOMAIN_COLORS
 from lib.transforms import map_field_to_domain, darken, field_order
 
+# Streamlit sometimes limits rows in Altair; disable that.
 alt.data_transformers.disable_max_rows()
+
 
 def _color_for_row(domain: str, in_lue: bool) -> str:
     base = DOMAIN_COLORS.get(domain, DOMAIN_COLORS["Other"])
     return darken(base, 0.7 if in_lue else 1.0)
 
+
 def field_mix_bars(
     df: pd.DataFrame,
     value_col: str = "count",
     percent: bool = False,
-    height_per_field: int = 18,          # tighter rows
+    height_per_field: int = 18,
     xmin: float | None = 0.0,
     xmax: float | None = None,
-    enforce_order_from: list[str] | None = None,  # pass the full field catalogue here
+    enforce_order_from: list[str] | None = None,   # pass FULL field catalogue here
     show_y_labels: bool = True,
+    width: int | None = None,                      # <-- accept width
 ):
     """
     Horizontal stacked bars of field distribution by domain.
     Segments: "ISITE" (darker) and "Not ISITE".
-    Ensures *every* field in `enforce_order_from` appears (zero bars if absent).
+    Ensures EVERY field in `enforce_order_from` appears (zeros if absent).
     """
+    if df is None or df.empty:
+        # Build an empty chart with the right encoding so Streamlit won't crash.
+        return alt.Chart(pd.DataFrame({"field": [], "value": []})).mark_bar()
+
+    # ---- ensure full field list + zeros for missing fields ----
     fields_full = enforce_order_from or sorted(df["field"].dropna().unique().tolist())
     base = pd.DataFrame({"field": fields_full})
     base["domain"] = base["field"].map(map_field_to_domain)
 
     d = df.copy()
-    d["in_lue_count"] = pd.to_numeric(d["in_lue_count"], errors="coerce").fillna(0).astype(int)
-    d[value_col] = pd.to_numeric(d[value_col], errors="coerce").fillna(0)
+    d["in_lue_count"] = pd.to_numeric(d.get("in_lue_count", 0), errors="coerce").fillna(0).astype(int)
+    d[value_col] = pd.to_numeric(d.get(value_col, 0), errors="coerce").fillna(0)
 
     d = base.merge(d[["field", value_col, "in_lue_count"]], on="field", how="left")
     d[[value_col, "in_lue_count"]] = d[[value_col, "in_lue_count"]].fillna(0)
 
+    # friendly segment names
     d["Not ISITE"] = d[value_col] - d["in_lue_count"]
     d["ISITE"] = d["in_lue_count"]
     d = d.melt(
@@ -53,20 +63,25 @@ def field_mix_bars(
 
     d["color"] = d.apply(lambda r: _color_for_row(r["domain"], bool(r["is_lue"])), axis=1)
 
+    # fixed order (domain buckets -> A→Z)
     order = field_order(fields_full)
-    chart_height = max(200, int(len(order) * height_per_field))
+    chart_height = max(220, int(len(order) * height_per_field))
 
-    # axes/scales
-    x_axis = (alt.Axis(format="%", tickCount=5) if percent else alt.Axis())
+    # X axis & scale
+    x_axis = alt.Axis(format="%", tickCount=5) if percent else alt.Axis()
     if percent:
         x_scale = alt.Scale(domain=[0, 1])
     else:
         lo = 0 if xmin is None else xmin
-        x_scale = alt.Scale(domain=[lo, xmax] if xmax and xmax > 0 else None)
+        x_scale = alt.Scale(domain=[lo, xmax] if (xmax is not None and xmax > 0) else None)
 
-    # much slimmer left margin; labels on both
+    # Force the full y-domain so labels always show (even when all zeros)
     y_axis = alt.Axis(labels=show_y_labels, ticks=False, labelFontSize=11, labelPadding=2, labelLimit=9999)
-    padding = {"left": 90, "right": 6, "top": 2, "bottom": 4}
+    y_scale = alt.Scale(domain=order)
+
+    # Slimmer margins to reduce wasted space; fixed left padding keeps the plotting
+    # width consistent between the two side-by-side charts.
+    padding = {"left": 80, "right": 6, "top": 2, "bottom": 4}
 
     tooltip = [
         alt.Tooltip("field:N", title="Field"),
@@ -75,14 +90,18 @@ def field_mix_bars(
         alt.Tooltip("value:Q", title=("Share" if percent else "Count"), format=(".0%" if percent else ",")),
     ]
 
-    return (
+    chart = (
         alt.Chart(d)
         .mark_bar()
         .encode(
-            y=alt.Y("field:N", sort=order, title=None, axis=y_axis),
+            y=alt.Y("field:N", scale=y_scale, title=None, axis=y_axis),
             x=alt.X("value:Q", title=("Share of works" if percent else "Works"), axis=x_axis, scale=x_scale),
-            color=alt.Color("color:N", scale=None, legend=None),
+            color=alt.Color("color:N", legend=None, scale=None),
             tooltip=tooltip,
         )
         .properties(height=chart_height, padding=padding)
     )
+    if width is not None:
+        chart = chart.properties(width=width)
+
+    return chart

@@ -38,5 +38,8 @@ def field_order(all_fields: list[str]) -> list[str]:
     return ordered
 
 def all_fields_order() -> list[str]:
-    """Canonical order of ALL fields (domain ordering, then A→Z inside each)."""
+    """
+    Canonical order of ALL fields: domain buckets (via FIELDS_TO_DOMAIN) then A→Z inside each.
+    """
+    from lib.constants import FIELDS_TO_DOMAIN
     return field_order(list(FIELDS_TO_DOMAIN.keys()))
