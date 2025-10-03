@@ -425,42 +425,41 @@ def partners_joined() -> pd.DataFrame:
     allp = load_all_partners()
     top  = load_top_partners()
 
-    # Ensure join keys exist even if a loader missed a rename (safety net)
-    for src, df in (("all", allp), ("top", top)):
-        cols = {c.lower(): c for c in df.columns}
-        # create canonical columns if only alternates exist
+    # Ensure canonical join keys exist
+    for df in (allp, top):
+        # bring 'inst_rors' -> 'inst_ror' if needed
         if "inst_ror" not in df.columns:
-            for alt in ("institutions ror", "institution ror", "ror"):
-                if alt in cols:
-                    df.rename(columns={cols[alt]: "inst_ror"}, inplace=True)
+            for alt in ("inst_rors", "Institution ROR", "Institutions ROR", "ROR"):
+                if alt in df.columns:
+                    df.rename(columns={alt: "inst_ror"}, inplace=True)
                     break
+        # bring 'inst_ids' -> 'inst_id' if needed
         if "inst_id" not in df.columns:
-            for alt in ("institutions id", "institution id", "id"):
-                if alt in cols:
-                    df.rename(columns={cols[alt]: "inst_id"}, inplace=True)
+            for alt in ("inst_ids", "Institution ID", "Institutions ID", "ID"):
+                if alt in df.columns:
+                    df.rename(columns={alt: "inst_id"}, inplace=True)
                     break
 
-    # 1) Left join on ROR
-    out = pd.merge(
-        top,
-        allp[["partner_name", "partner_type", "country", "inst_id", "inst_ror"]],
-        on="inst_ror",
-        how="left",
-        suffixes=("", "_all"),
-    )
+    # 1) Prefer ROR join
+    join_cols = ["partner_name", "partner_type", "country", "inst_id", "inst_ror"]
+    right = allp[[c for c in join_cols if c in allp.columns]].copy()
+    out = top.merge(right, on="inst_ror", how="left", suffixes=("", "_all"))
 
-    # 2) Fill any missing partner info via inst_id
-    miss = out["partner_name"].isna()
-    if miss.any() and "inst_id" in out.columns and "inst_id" in allp.columns:
-        fill = out.loc[miss, ["inst_id"]].merge(
-            allp[["partner_name", "partner_type", "country", "inst_id"]],
-            on="inst_id",
-            how="left",
-        )
-        out.loc[miss, ["partner_name", "partner_type", "country"]] = fill[
-            ["partner_name", "partner_type", "country"]
-        ].values
+    # 2) Fill any missing partner info via inst_id using map (1:1 shape-safe)
+    if "inst_id" in out.columns and "inst_id" in allp.columns:
+        base = (allp.dropna(subset=["inst_id"])
+                    .drop_duplicates("inst_id")
+                    .set_index("inst_id"))
+        name_map = base["partner_name"].to_dict() if "partner_name" in base.columns else {}
+        type_map = base["partner_type"].to_dict() if "partner_type" in base.columns else {}
+        ctry_map = base["country"].to_dict()      if "country"      in base.columns else {}
 
+        miss = out["partner_name"].isna()
+        out.loc[miss, "partner_name"] = out.loc[miss, "inst_id"].map(name_map)
+        out.loc[miss, "partner_type"] = out.loc[miss, "inst_id"].map(type_map)
+        out.loc[miss, "country"]      = out.loc[miss, "inst_id"].map(ctry_map)
+
+    # Numeric coercions
     for c in ["copubs", "avg_fwci_fr", "share_partner_output", "share_of_ul_output", "partner_total_works"]:
         if c in out.columns:
             out[c] = pd.to_numeric(out[c], errors="coerce")

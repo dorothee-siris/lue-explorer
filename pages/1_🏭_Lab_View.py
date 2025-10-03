@@ -18,6 +18,7 @@ from lib.data_io import (
     explode_labs,
     author_global_metrics,
     load_authors_lookup,
+    explode_authors,
 )
 
 # ---------------------------------------------------------------------
@@ -262,111 +263,81 @@ else:
     st.altair_chart(chart, use_container_width=True)
 
     # ---------- TOP AUTHORS (co-pubs) + enrich ----------
-    rows = []
-    LEAD = re.compile(r"^\[\d+\]\s*")
-    for _, r in copubs[["openalex_id", "authors", "authors_id", "fwci"]].iterrows():
-        names = [LEAD.sub("", x).strip() for x in str(r["authors"] or "").split("|") if x.strip()]
-        ids   = [LEAD.sub("", x).strip() for x in str(r["authors_id"] or "").split("|") if x.strip()]
-        if len(names) < len(ids):
-            names += [""] * (len(ids) - len(names))
-        if len(ids) < len(names):
-            ids += [""] * (len(names) - len(ids))
-        for nm, aid in zip(names, ids):
-            if not aid and not nm:
-                continue
-            rows.append({"author_id": aid, "Author": nm, "openalex_id": r["openalex_id"], "fwci": r["fwci"]})
-    ea = pd.DataFrame(rows)
-
-    top_counts = (
-        ea.groupby(["author_id", "Author"], as_index=False)
-          .agg(Publications=("openalex_id", "nunique"))
-          .sort_values("Publications", ascending=False)
-    )
-
-    g = author_global_metrics(pubs).rename(columns={
-        "author_id": "author_id",
-        "author_name": "Author",
-        "total_pubs": "Total publications",
-        "avg_fwci_overall": "Avg. FWCI (overall)",
-        "labs_concat": "Lab(s)",
-    })
-
-    lk = load_authors_lookup()
-    if lk is not None and not lk.empty:
-        lk = lk.rename(columns={
-            "author_id": "author_id",
-            "orcid": "ORCID",
-            "is_lorraine": "Is Lorraine",
-            "labs_from_dict": "Lab(s) (dict)",
-        })[["author_id", "ORCID", "Is Lorraine", "Lab(s) (dict)"]]
-    else:
-        lk = pd.DataFrame(columns=["author_id", "ORCID", "Is Lorraine", "Lab(s) (dict)"])
-
-    top_authors = top_counts.merge(g, on=["author_id", "Author"], how="left").merge(lk, on="author_id", how="left")
-
-    # prefer dict labs if present; otherwise keep computed labs
-    if "Lab(s) (dict)" in top_authors.columns:
-        top_authors["Lab(s)"] = top_authors["Lab(s) (dict)"].fillna(top_authors.get("Lab(s)", ""))
-        top_authors = top_authors.drop(columns=["Lab(s) (dict)"], errors="ignore")
-
-    top_authors = top_authors.sort_values(["Publications", "Avg. FWCI (overall)"], ascending=[False, False]).head(25)
-
-    avg_fwci = float(pd.to_numeric(copubs.get("fwci_fr", copubs.get("fwci_all")), errors="coerce").mean() or 0.0)
-
-    # Top authors in these co-publications (robust to schema)
     st.markdown("### Top authors in these co-publications")
 
+    # Average FWCI — use FWCI_FR only (per your new schema requirement)
+    avg_fwci = float(pd.to_numeric(copubs.get("fwci_fr"), errors="coerce").mean() or 0.0)
+
+    # Build author co-publication counts for the current 'copubs' set
     rows = []
     LEAD = re.compile(r"^\[\d+\]\s*")
-    for _, r in copubs[["openalex_id", "authors", "authors_id"]].iterrows():
-        names = [LEAD.sub("", x).strip() for x in str(r["authors"] or "").split("|") if x.strip()]
-        ids   = [LEAD.sub("", x).strip() for x in str(r["authors_id"] or "").split("|") if x.strip()]
-        if len(names) < len(ids): names += [""] * (len(ids) - len(names))
-        if len(ids)   < len(names): ids   += [""] * (len(names) - len(ids))
-        for nm, aid in zip(names, ids):
-            if not aid and not nm:
-                continue
-            rows.append({"author_id": aid, "Author": nm, "openalex_id": r["openalex_id"]})
 
-    ea = pd.DataFrame(rows)
-
-    top_counts = (
-        ea.groupby(["author_id", "Author"], as_index=False)
-        .agg(Copubs=("openalex_id", "nunique"))
-        .sort_values("Copubs", ascending=False)
-    )
-
-    # Enrich with overall author stats and lookup info
-    g = author_global_metrics(pubs).rename(
-        columns={
-            "author_id": "author_id",
-            "author_name": "Author",
-            "total_pubs": "Total publications",
-            "avg_fwci_overall": "Avg. FWCI (overall)",
-        }
-    )
-
-    lk = load_authors_lookup()
-    if lk is not None and not lk.empty:
-        lk = lk.rename(
-            columns={"orcid": "ORCID", "is_lorraine": "Is Lorraine", "labs_from_dict": "Lab(s)"}
-        )[["author_id", "ORCID", "Is Lorraine", "Lab(s)"]]
+    if {"authors", "authors_id"}.issubset(copubs.columns):
+        # Parse the compact string columns
+        for _, r in copubs[["openalex_id", "authors", "authors_id"]].iterrows():
+            names = [LEAD.sub("", x).strip() for x in str(r["authors"] or "").split("|") if x.strip()]
+            ids   = [LEAD.sub("", x).strip() for x in str(r["authors_id"] or "").split("|") if x.strip()]
+            if len(names) < len(ids): names += [""] * (len(ids) - len(names))
+            if len(ids)   < len(names): ids   += [""] * (len(names) - len(ids))
+            for nm, aid in zip(names, ids):
+                if not aid and not nm:
+                    continue
+                rows.append({"author_id": aid, "Author": nm, "openalex_id": r["openalex_id"]})
+        ea = pd.DataFrame(rows)
     else:
-        lk = pd.DataFrame(columns=["author_id", "ORCID", "Is Lorraine", "Lab(s)"])
+        # Fallback: explode from core and filter to copubs IDs
+        ea = explode_authors(pubs)
+        if not ea.empty:
+            ea = ea[ea["openalex_id"].isin(set(copubs["openalex_id"]))].rename(
+                columns={"author_name": "Author"}
+            )
 
-    top_authors = top_counts.merge(g, on=["author_id", "Author"], how="left").merge(lk, on="author_id", how="left")
-    top_authors = top_authors.sort_values(["Copubs", "Avg. FWCI (overall)"], ascending=[False, False]).head(25)
+    # Aggregate top co-pubbing authors
+    if ea.empty:
+        st.info("No authors found for the selected co-publications.")
+    else:
+        top_counts = (
+            ea.groupby(["author_id", "Author"], as_index=False)
+            .agg(Copubs=("openalex_id", "nunique"))
+            .sort_values("Copubs", ascending=False)
+        )
 
-    st.dataframe(
-        top_authors[["Author", "author_id", "ORCID", "Copubs", "Total publications", "Avg. FWCI (overall)", "Is Lorraine", "Lab(s)"]],
-        use_container_width=True, hide_index=True,
-        column_config={
-            "author_id": st.column_config.TextColumn("Author ID"),
-            "Copubs": st.column_config.NumberColumn(format="%.0f"),
-            "Total publications": st.column_config.NumberColumn(format="%.0f"),
-            "Avg. FWCI (overall)": st.column_config.NumberColumn(format="%.2f"),
-        },
-    )
+        # Enrich with overall author stats (uses FWCI_FR under the hood)
+        g = author_global_metrics(pubs).rename(
+            columns={
+                "author_id": "author_id",
+                "author_name": "Author",
+                "total_pubs": "Total publications",
+                "avg_fwci_overall": "Avg. FWCI (overall)",
+            }
+        )
+
+        # Optional lookup (ORCID, Is Lorraine, Lab(s)) if available
+        lk = load_authors_lookup()
+        if lk is not None and not lk.empty:
+            lk = lk.rename(
+                columns={"orcid": "ORCID", "is_lorraine": "Is Lorraine", "labs_from_dict": "Lab(s)"}
+            )[["author_id", "ORCID", "Is Lorraine", "Lab(s)"]]
+        else:
+            lk = pd.DataFrame(columns=["author_id", "ORCID", "Is Lorraine", "Lab(s)"])
+
+        top_authors = (
+            top_counts.merge(g, on=["author_id", "Author"], how="left")
+                    .merge(lk, on="author_id", how="left")
+                    .sort_values(["Copubs", "Avg. FWCI (overall)"], ascending=[False, False])
+                    .head(25)
+        )
+
+        st.dataframe(
+            top_authors[["Author", "author_id", "ORCID", "Copubs", "Total publications", "Avg. FWCI (overall)", "Is Lorraine", "Lab(s)"]],
+            use_container_width=True, hide_index=True,
+            column_config={
+                "author_id": st.column_config.TextColumn("Author ID"),
+                "Copubs": st.column_config.NumberColumn(format="%.0f"),
+                "Total publications": st.column_config.NumberColumn(format="%.0f"),
+                "Avg. FWCI (overall)": st.column_config.NumberColumn(format="%.2f"),
+            },
+        )
 
     # ---------- ALL CO-PUBLICATIONS (rich, exportable) ----------
     want = [
