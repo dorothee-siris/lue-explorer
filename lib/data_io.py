@@ -94,6 +94,7 @@ def load_internal(data_path: Optional[str] = None) -> pd.DataFrame:
 
     # required / commonly used columns
     map_cols = {
+        low.get("unit type", "Unit Type"): "unit_type",
         low.get("unit ror", "Unit ROR"): "lab_ror",
         low.get("unit name", "Unit Name"): "lab_name",
         low.get("total publications", "Total publications"): "pubs_19_23",
@@ -424,18 +425,41 @@ def partners_joined() -> pd.DataFrame:
     allp = load_all_partners()
     top  = load_top_partners()
 
-    # robust join: prefer ROR, fall back to ID if needed
-    join_keys = [k for k in ["inst_ror", "inst_id"] if (k in top.columns and k in allp.columns)]
-    if not join_keys:
-        raise KeyError("partners_joined(): could not find 'inst_ror' or 'inst_id' in both frames after normalization")
+    # Ensure join keys exist even if a loader missed a rename (safety net)
+    for src, df in (("all", allp), ("top", top)):
+        cols = {c.lower(): c for c in df.columns}
+        # create canonical columns if only alternates exist
+        if "inst_ror" not in df.columns:
+            for alt in ("institutions ror", "institution ror", "ror"):
+                if alt in cols:
+                    df.rename(columns={cols[alt]: "inst_ror"}, inplace=True)
+                    break
+        if "inst_id" not in df.columns:
+            for alt in ("institutions id", "institution id", "id"):
+                if alt in cols:
+                    df.rename(columns={cols[alt]: "inst_id"}, inplace=True)
+                    break
 
+    # 1) Left join on ROR
     out = pd.merge(
         top,
-        allp[["partner_name", "partner_type", "country"] + join_keys],
-        on=join_keys,
+        allp[["partner_name", "partner_type", "country", "inst_id", "inst_ror"]],
+        on="inst_ror",
         how="left",
         suffixes=("", "_all"),
     )
+
+    # 2) Fill any missing partner info via inst_id
+    miss = out["partner_name"].isna()
+    if miss.any() and "inst_id" in out.columns and "inst_id" in allp.columns:
+        fill = out.loc[miss, ["inst_id"]].merge(
+            allp[["partner_name", "partner_type", "country", "inst_id"]],
+            on="inst_id",
+            how="left",
+        )
+        out.loc[miss, ["partner_name", "partner_type", "country"]] = fill[
+            ["partner_name", "partner_type", "country"]
+        ].values
 
     for c in ["copubs", "avg_fwci_fr", "share_partner_output", "share_of_ul_output", "partner_total_works"]:
         if c in out.columns:

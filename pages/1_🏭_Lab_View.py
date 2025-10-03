@@ -123,9 +123,19 @@ st.divider()
 # ---------------------------------------------------------------------
 st.subheader("Compare two labs")
 
-lab_options = internal[["lab_name", "lab_ror"]].drop_duplicates()
-labels = lab_options["lab_name"].tolist()
-name_to_ror = dict(zip(lab_options["lab_name"], lab_options["lab_ror"]))
+# Keep only the 61 labs; fall back to labs seen in pubs if unit_type is missing
+if "unit_type" in internal.columns:
+    labs_only = internal[internal["unit_type"].str.lower().eq("lab")].copy()
+else:
+    # fallback: take RORs that actually appear in pubs (should be the same 61)
+    seen_labs = set(explode_labs(pubs)["lab_ror"].dropna().unique())
+    labs_only = internal[internal["lab_ror"].isin(seen_labs)].copy()
+
+# sort A–Z
+labs_only = labs_only.drop_duplicates(subset=["lab_ror", "lab_name"]).sort_values("lab_name")
+
+labels = labs_only["lab_name"].tolist()
+name_to_ror = dict(zip(labs_only["lab_name"], labs_only["lab_ror"]))
 
 c1, c2 = st.columns(2)
 with c1:
@@ -301,13 +311,58 @@ else:
 
     top_authors = top_authors.sort_values(["Publications", "Avg. FWCI (overall)"], ascending=[False, False]).head(25)
 
-    st.markdown("**Top authors in these co-publications**")
+    avg_fwci = float(pd.to_numeric(copubs.get("fwci_fr", copubs.get("fwci_all")), errors="coerce").mean() or 0.0)
+
+    # Top authors in these co-publications (robust to schema)
+    st.markdown("### Top authors in these co-publications")
+
+    rows = []
+    LEAD = re.compile(r"^\[\d+\]\s*")
+    for _, r in copubs[["openalex_id", "authors", "authors_id"]].iterrows():
+        names = [LEAD.sub("", x).strip() for x in str(r["authors"] or "").split("|") if x.strip()]
+        ids   = [LEAD.sub("", x).strip() for x in str(r["authors_id"] or "").split("|") if x.strip()]
+        if len(names) < len(ids): names += [""] * (len(ids) - len(names))
+        if len(ids)   < len(names): ids   += [""] * (len(names) - len(ids))
+        for nm, aid in zip(names, ids):
+            if not aid and not nm:
+                continue
+            rows.append({"author_id": aid, "Author": nm, "openalex_id": r["openalex_id"]})
+
+    ea = pd.DataFrame(rows)
+
+    top_counts = (
+        ea.groupby(["author_id", "Author"], as_index=False)
+        .agg(Copubs=("openalex_id", "nunique"))
+        .sort_values("Copubs", ascending=False)
+    )
+
+    # Enrich with overall author stats and lookup info
+    g = author_global_metrics(pubs).rename(
+        columns={
+            "author_id": "author_id",
+            "author_name": "Author",
+            "total_pubs": "Total publications",
+            "avg_fwci_overall": "Avg. FWCI (overall)",
+        }
+    )
+
+    lk = load_authors_lookup()
+    if lk is not None and not lk.empty:
+        lk = lk.rename(
+            columns={"orcid": "ORCID", "is_lorraine": "Is Lorraine", "labs_from_dict": "Lab(s)"}
+        )[["author_id", "ORCID", "Is Lorraine", "Lab(s)"]]
+    else:
+        lk = pd.DataFrame(columns=["author_id", "ORCID", "Is Lorraine", "Lab(s)"])
+
+    top_authors = top_counts.merge(g, on=["author_id", "Author"], how="left").merge(lk, on="author_id", how="left")
+    top_authors = top_authors.sort_values(["Copubs", "Avg. FWCI (overall)"], ascending=[False, False]).head(25)
+
     st.dataframe(
-        top_authors[["Author", "author_id", "ORCID", "Publications", "Total publications", "Avg. FWCI (overall)", "Is Lorraine", "Lab(s)"]],
+        top_authors[["Author", "author_id", "ORCID", "Copubs", "Total publications", "Avg. FWCI (overall)", "Is Lorraine", "Lab(s)"]],
         use_container_width=True, hide_index=True,
         column_config={
             "author_id": st.column_config.TextColumn("Author ID"),
-            "Publications": st.column_config.NumberColumn(format="%.0f"),
+            "Copubs": st.column_config.NumberColumn(format="%.0f"),
             "Total publications": st.column_config.NumberColumn(format="%.0f"),
             "Avg. FWCI (overall)": st.column_config.NumberColumn(format="%.2f"),
         },
