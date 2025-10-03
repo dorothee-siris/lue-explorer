@@ -464,7 +464,7 @@ def partners_joined() -> pd.DataFrame:
         if c in out.columns:
             out[c] = pd.to_numeric(out[c], errors="coerce")
 
-    return out
+    return out  
 
 def explode_field_details(details: object) -> pd.DataFrame:
     """
