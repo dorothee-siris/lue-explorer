@@ -132,7 +132,7 @@ def simple_field_bars(
     base = pd.DataFrame({"field": fields_full})
     base["domain"] = base["field"].map(map_field_to_domain)
 
-    # merge so missing fields exist with zeros
+    # Ensure missing fields exist with zeros
     d = base.merge(d[["field", value_col]], on="field", how="left")
     d[value_col] = d[value_col].fillna(0)
 
@@ -181,4 +181,3 @@ def simple_field_bars(
     return alt.layer(*layers).properties(
         height=h, width=width, padding={"left": 80, "right": 6, "top": 2, "bottom": 4}
     )
-

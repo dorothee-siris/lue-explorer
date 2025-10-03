@@ -61,7 +61,7 @@ st.divider()
 # ---------------------------------------------------------------------
 st.subheader("Per-lab overview (2019–2023)")
 
-summary = lab_summary_table_from_internal(internal, year_min=YEAR_START, year_max=YEAR_END).copy()
+summary = lab_summary_table_from_internal(pubs, internal)
 
 # display-friendly %
 summary["share_pct_display"]   = summary["share_of_dataset_works"] * 100.0
