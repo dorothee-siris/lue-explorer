@@ -61,13 +61,14 @@ st.divider()
 # ---------------------------------------------------------------------
 st.subheader("Per-lab overview (2019–2023)")
 
+# Build summary table (includes ratios if present)
 summary = lab_summary_table_from_internal(pubs, internal)
 
-# display-friendly %
-summary["share_pct_display"]   = summary["share_of_dataset_works"] * 100.0
-summary["lue_pct_display"]     = summary["lue_pct"] * 100.0
-summary["intl_pct_display"]    = summary["intl_pct"] * 100.0
-summary["company_pct_display"] = summary["company_pct"] * 100.0
+# display-friendly % columns (tolerant to missing ratios)
+summary["share_pct_display"]     = pd.to_numeric(summary.get("share_of_dataset_works", 0), errors="coerce").fillna(0) * 100.0
+summary["lue_pct_display"]       = pd.to_numeric(summary.get("lue_ratio_abs", 0), errors="coerce").fillna(0) * 100.0
+summary["intl_pct_display"]      = pd.to_numeric(summary.get("intl_ratio", 0), errors="coerce").fillna(0) * 100.0
+summary["company_pct_display"]   = pd.to_numeric(summary.get("company_ratio", 0), errors="coerce").fillna(0) * 100.0
 
 max_share = float(summary["share_pct_display"].max() or 1.0)
 max_lue   = float(summary["lue_pct_display"].max() or 1.0)
@@ -79,7 +80,7 @@ default_cols = [
     "lue_pct_display", "intl_pct_display", "company_pct_display",
     "avg_fwci",
 ]
-column_order = default_cols + ["openalex_ui_url", "ror_url"]  # visible in column menu (hidden by default)
+column_order = default_cols + ["openalex_ui_url", "ror_url"]  # visible in column menu
 
 st.dataframe(
     summary,
@@ -110,9 +111,10 @@ if not years_sel:
     st.stop()
 year_min, year_max = min(years_sel), max(years_sel)
 
-# rebuild OpenAlex links for the chosen window
-summary_links = lab_summary_table_from_internal(internal, year_min=year_min, year_max=year_max)[["lab_name", "openalex_ui_url"]]
-summary = summary.drop(columns=["openalex_ui_url"]).merge(summary_links, on="lab_name", how="left")
+# rebuild OpenAlex links for the chosen window (keep the current row order)
+new_links = lab_summary_table_from_internal(pubs, internal, year_min=year_min, year_max=year_max)[["lab_ror", "openalex_ui_url"]]
+summary = summary.drop(columns=["openalex_ui_url"], errors="ignore").merge(new_links, on="lab_ror", how="left")
+
 
 st.divider()
 
@@ -121,9 +123,7 @@ st.divider()
 # ---------------------------------------------------------------------
 st.subheader("Compare two labs")
 
-lab_options = internal[["laboratoire", "unit_ror"]].drop_duplicates().rename(
-    columns={"laboratoire": "lab_name", "unit_ror": "lab_ror"}
-)
+lab_options = internal[["lab_name", "lab_ror"]].drop_duplicates()
 labels = lab_options["lab_name"].tolist()
 name_to_ror = dict(zip(lab_options["lab_name"], lab_options["lab_ror"]))
 
