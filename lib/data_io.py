@@ -71,16 +71,21 @@ def load_core(data_path: Optional[str] = None) -> pd.DataFrame:
         "Is_PPtop10%_(subfield)": "is_pp10_subfield",
         "Is_PPtop1%_(subfield)": "is_pp1_subfield",
     }
-    # apply case-insensitive renames
+    # case-insensitive renames
     low = {c.lower(): c for c in df.columns}
     ren_ci = {low.get(k.lower(), k): v for k, v in ren.items() if low.get(k.lower(), None) in df.columns}
     df = df.rename(columns=ren_ci)
 
-    for c in ["year", "citation_count", "primary_field_id", "primary_subfield_id", "primary_domain_id"]:
+    # numeric coercions
+    for c in ["year", "citation_count", "cites_per_year", "primary_field_id", "primary_subfield_id", "primary_domain_id", "fwci_fr", "fwci_all"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
-    if "in_lue" in df.columns:
-        df["in_lue"] = df["in_lue"].fillna(False).astype(bool)
+
+    # boolean coercions (avoid future warnings)
+    for c in ["in_lue", "is_pp10_field", "is_pp1_field", "is_pp10_subfield", "is_pp1_subfield"]:
+        if c in df.columns:
+            df[c] = df[c].astype("boolean").fillna(False).astype(bool)
+
     return df
 
 @st.cache_data(show_spinner=False)
@@ -92,25 +97,39 @@ def load_internal(data_path: Optional[str] = None) -> pd.DataFrame:
     df = load_parquet("dict_internal.parquet", data_path).copy()
     low = {c.lower(): c for c in df.columns}
 
-    # required / commonly used columns
+    # single-source renames (no duplicate keys)
     map_cols = {
         low.get("unit type", "Unit Type"): "unit_type",
         low.get("unit ror", "Unit ROR"): "lab_ror",
         low.get("unit name", "Unit Name"): "lab_name",
-        low.get("total publications", "Total publications"): "pubs_19_23",
-        low.get("% of lorraine production", "% of Lorraine production"): "share_of_dataset_works",
-        # optional extras (may not exist depending on your build)
+        low.get("unit openalex id", "Unit OpenAlex ID"): "lab_openalex_id",
+
+        # totals/ratios we will use; these correspond to 2019–2023 in your export
+        low.get("total publications", "Total publications"): "pubs_total_internal",
+        low.get("% of lorraine production", "% of Lorraine production"): "share_of_ul_internal",  # ratio (0..1)
+
+        # other useful ratios from dict_internal
         low.get("international collabs (ratio)", "International collabs (ratio)"): "intl_ratio",
         low.get("company collabs (abs ratio)", "Company collabs (abs ratio)"): "company_ratio",
+
+        # LUE counts/ratios (absolute = count/pubs)
         low.get("count of is_lue", "count of IS_LUE"): "lue_count",
         low.get("% of is_lue (absolute)", "% of IS_LUE (absolute)"): "lue_ratio_abs",
         low.get("% of is_lue (relative to labs)", "% of IS_LUE (relative to labs)"): "lue_ratio_rel",
     }
     df = df.rename(columns={k: v for k, v in map_cols.items() if k in df.columns})
 
-    for c in ["pubs_19_23", "share_of_dataset_works", "intl_ratio", "company_ratio", "lue_count", "lue_ratio_abs", "lue_ratio_rel"]:
+    # numeric coercions
+    for c in ["pubs_total_internal", "share_of_ul_internal", "lue_count", "lue_ratio_abs", "lue_ratio_rel", "intl_ratio", "company_ratio"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    # ---- Back-compat aliases for older code (if needed) ----
+    # Some pages/functions still expect these older names.
+    if "pubs_total_internal" in df.columns and "pubs_19_23" not in df.columns:
+        df["pubs_19_23"] = df["pubs_total_internal"]
+    if "share_of_ul_internal" in df.columns and "share_of_dataset_works" not in df.columns:
+        df["share_of_dataset_works"] = df["share_of_ul_internal"]
 
     return df
 
@@ -326,9 +345,17 @@ def lab_summary_table_from_internal(
             out["lue_ratio_abs"] = (pd.to_numeric(out["lue_count"], errors="coerce") /
                                     pd.to_numeric(out["pubs_19_23"], errors="coerce")).clip(lower=0, upper=1)
 
-    # Links (ROR + OpenAlex filter by ROR)
+    # Links (prefer OpenAlex institution id; fallback to ROR)
     y0 = year_min or YEAR_START
     y1 = year_max or YEAR_END
+
+    def openalex_ui_for_id(oa_id: str, y0=y0, y1=y1):
+        return (
+            "https://openalex.org/works?"
+            f"page=1&filter=authorships.institutions.id:{oa_id},"
+            f"type:types/article|types/book-chapter|types/review|types/book,"
+            f"publication_year:{y0}-{y1}"
+        )
 
     def openalex_ui_for_ror(ror: str, y0=y0, y1=y1):
         return (
@@ -338,19 +365,31 @@ def lab_summary_table_from_internal(
             f"publication_year:{y0}-{y1}"
         )
 
-    out["openalex_ui_url"] = out["lab_ror"].fillna("").map(lambda r: openalex_ui_for_ror(r) if r else "")
+    if "lab_openalex_id" in out.columns:
+        out["openalex_ui_url"] = out.apply(
+            lambda r: openalex_ui_for_id(str(r["lab_openalex_id"])) if pd.notna(r["lab_openalex_id"]) and str(r["lab_openalex_id"]) else (
+                      openalex_ui_for_ror(str(r["lab_ror"])) if pd.notna(r["lab_ror"]) and str(r["lab_ror"]) else ""),
+            axis=1,
+        )
+    else:
+        out["openalex_ui_url"] = out["lab_ror"].fillna("").map(lambda r: openalex_ui_for_ror(r) if r else "")
+
     out["ror_url"] = out["lab_ror"].fillna("").map(lambda r: f"https://ror.org/{r}" if r else "")
 
     cols = ["lab_name", "lab_ror", "pubs_19_23", "share_of_dataset_works", "avg_fwci",
             "lue_ratio_abs", "intl_ratio", "company_ratio", "openalex_ui_url", "ror_url"]
     keep = [c for c in cols if c in out.columns]
-    return out[keep].sort_values("pubs_19_23", ascending=False)
+
+    # robust sort: prefer pubs_19_23, else pubs_total_internal if present
+    sort_key = "pubs_19_23" if "pubs_19_23" in out.columns else ("pubs_total_internal" if "pubs_total_internal" in out.columns else None)
+    if sort_key:
+        return out[keep].sort_values(sort_key, ascending=False)
+    return out[keep]
 
 @st.cache_data(show_spinner=False)
 def lab_field_counts(pubs: pd.DataFrame, years: Optional[List[int]] = None) -> pd.DataFrame:
     """
-    (Compat helper used by pages) Compute counts by (lab_ror, field) for selected years.
-    Uses core 'primary_field_id'. Also returns in_lue_count.
+    Compute counts by (lab_ror, field) for selected years.
     Output columns:
       lab_ror, field_id, field_name, domain_name, field, domain, count, in_lue_count
     """
@@ -361,7 +400,7 @@ def lab_field_counts(pubs: pd.DataFrame, years: Optional[List[int]] = None) -> p
     subset = pubs[pubs["year"].isin(years)][["openalex_id", "primary_field_id", "in_lue"]].merge(
         el, on="openalex_id", how="left"
     )
-    subset["in_lue"] = subset["in_lue"].fillna(False).astype(bool)
+    subset["in_lue"] = subset["in_lue"].astype("boolean").fillna(False).astype(bool)
 
     g = subset.groupby(["lab_ror", "primary_field_id"], as_index=False).agg(
         count=("openalex_id", "nunique"),
@@ -427,13 +466,11 @@ def partners_joined() -> pd.DataFrame:
 
     # Ensure canonical join keys exist
     for df in (allp, top):
-        # bring 'inst_rors' -> 'inst_ror' if needed
         if "inst_ror" not in df.columns:
             for alt in ("inst_rors", "Institution ROR", "Institutions ROR", "ROR"):
                 if alt in df.columns:
                     df.rename(columns={alt: "inst_ror"}, inplace=True)
                     break
-        # bring 'inst_ids' -> 'inst_id' if needed
         if "inst_id" not in df.columns:
             for alt in ("inst_ids", "Institution ID", "Institutions ID", "ID"):
                 if alt in df.columns:
@@ -447,9 +484,7 @@ def partners_joined() -> pd.DataFrame:
 
     # 2) Fill any missing partner info via inst_id using map (1:1 shape-safe)
     if "inst_id" in out.columns and "inst_id" in allp.columns:
-        base = (allp.dropna(subset=["inst_id"])
-                    .drop_duplicates("inst_id")
-                    .set_index("inst_id"))
+        base = (allp.dropna(subset=["inst_id"]).drop_duplicates("inst_id").set_index("inst_id"))
         name_map = base["partner_name"].to_dict() if "partner_name" in base.columns else {}
         type_map = base["partner_type"].to_dict() if "partner_type" in base.columns else {}
         ctry_map = base["country"].to_dict()      if "country"      in base.columns else {}
@@ -464,7 +499,7 @@ def partners_joined() -> pd.DataFrame:
         if c in out.columns:
             out[c] = pd.to_numeric(out[c], errors="coerce")
 
-    return out  
+    return out
 
 def explode_field_details(details: object) -> pd.DataFrame:
     """

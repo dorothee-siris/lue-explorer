@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import re
-from collections import defaultdict
 from typing import Dict, List, Tuple
 
 import altair as alt
@@ -25,9 +24,8 @@ from lib.data_io import (
 st.set_page_config(page_title="Lab View", page_icon="🏭", layout="wide")
 st.title("🏭 Lab View")
 
-# Fixed analysis window for topline/table (per spec)
 YEAR_MIN, YEAR_MAX = 2019, 2023
-YEARS_DEFAULT = list(range(YEAR_MIN, YEAR_MAX + 1))
+YEARS_1923 = list(range(YEAR_MIN, YEAR_MAX + 1))
 
 # ------------------------------------------------------------
 # Helpers
@@ -41,131 +39,98 @@ def split_positions(s: object) -> List[str]:
     return [t for t in toks if t]
 
 def build_topics_hierarchy(topics: pd.DataFrame) -> Tuple[pd.DataFrame, List[str], List[str]]:
-    """
-    Returns:
-      topics_clean: ['domain_id','domain_name','field_id','field_name','subfield_id','subfield_name']
-      domain_order: stable list of domains (A–Z by domain_name)
-      field_order:  stable list of fields (grouped by domain, then A–Z by field_name)
-    """
     keep = ["domain_id","domain_name","field_id","field_name","subfield_id","subfield_name"]
     t = topics[keep].drop_duplicates().copy()
-    # Domain order A–Z
     domains = t[["domain_id","domain_name"]].drop_duplicates().sort_values("domain_name")
     domain_order = domains["domain_name"].tolist()
-
-    # Field order: domain groups, inside A–Z by field_name
-    fields = t[["domain_name","field_id","field_name"]].drop_duplicates()
-    fields = fields.sort_values(["domain_name","field_name"])
+    fields = t[["domain_name","field_id","field_name"]].drop_duplicates().sort_values(["domain_name","field_name"])
     field_order = fields["field_name"].tolist()
-
     return t, domain_order, field_order
 
 def make_domain_palette(domain_names: List[str]) -> Dict[str, str]:
-    """
-    Assign a stable color per domain. Extend palette if needed.
-    (Colors chosen for good contrast; keep stable once assigned.)
-    """
-    base = [
-        "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
-        "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
-        "#4c78a8", "#f58518", "#54a24b", "#e45756", "#b279a2",
+    palette = [
+        "#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd",
+        "#8c564b","#e377c2","#7f7f7f","#bcbd22","#17becf",
+        "#4c78a8","#f58518","#54a24b","#e45756","#b279a2",
     ]
-    pal = {}
-    for i, dn in enumerate(domain_names):
-        pal[dn] = base[i % len(base)]
-    return pal
+    return {dn: palette[i % len(palette)] for i, dn in enumerate(domain_names)}
 
-def prepare_core():
-    """Load and filter to publications with at least one lab (any year)."""
+def prepare_core() -> pd.DataFrame:
+    """Load UL core and standardise dtypes. Keep *all* works; we’ll filter later."""
     pubs = load_core().copy()
 
-    # numeric / boolean coercions (guard against mixed dtypes)
-    for c in ["year", "citation_count"]:
-        if c in pubs.columns:
-            pubs[c] = pd.to_numeric(pubs[c], errors="coerce")
-    for c in ["fwci_fr"]:
-        if c in pubs.columns:
-            pubs[c] = pd.to_numeric(pubs[c], errors="coerce")
+    # numeric/boolean coercions without future warnings
+    if "year" in pubs: pubs["year"] = pd.to_numeric(pubs["year"], errors="coerce")
+    if "citation_count" in pubs: pubs["citation_count"] = pd.to_numeric(pubs["citation_count"], errors="coerce")
+    if "fwci_fr" in pubs: pubs["fwci_fr"] = pd.to_numeric(pubs["fwci_fr"], errors="coerce")
+
     for c in ["in_lue", "is_pp10_field", "is_pp1_field"]:
         if c in pubs.columns:
-            pubs[c] = pubs[c].fillna(False).astype(bool)
-
-    # keep rows with at least one lab present
-    has_lab = pubs["labs_rors"].fillna("").astype(str).str.strip().ne("")
-    pubs = pubs.loc[has_lab].copy()
+            pubs[c] = pubs[c].astype("boolean").fillna(False).astype(bool)
 
     return pubs
 
+def pubs_with_labs(df: pd.DataFrame) -> pd.DataFrame:
+    mask = df["labs_rors"].fillna("").astype(str).str.strip().ne("") if "labs_rors" in df.columns else False
+    return df.loc[mask].copy()
+
 def filter_years(df: pd.DataFrame, years: List[int]) -> pd.DataFrame:
-    if "year" not in df.columns:
-        return df.iloc[0:0].copy()
-    return df[df["year"].isin(years)].copy()
+    return df[df["year"].isin(years)].copy() if "year" in df.columns else df.iloc[0:0].copy()
 
 def compute_pub_level_flags(pubs: pd.DataFrame) -> pd.DataFrame:
-    """
-    Compute per-publication flags we need once:
-      - has_international: at least one inst country != "FR"
-      - n_labs: number of unique labs (from labs_rors)
-    """
+    """Compute 'has_international' and 'n_labs' flags per work."""
     df = pubs.copy()
 
-    # International flag
     if "inst_countries" in df.columns:
         def has_foreign(countries: object) -> bool:
             cs = {x.upper() for x in split_positions(countries)}
-            cs.discard("")  # remove empties
-            # If any non-FR exists -> international
+            cs.discard("")
             return any(c and c != "FR" for c in cs)
         df["has_international"] = df["inst_countries"].map(has_foreign)
     else:
         df["has_international"] = False
 
-    # Number of labs per pub
     def n_labs(s: object) -> int:
         labs = {x for x in split_positions(s) if x}
         return len(labs)
-    df["n_labs"] = df["labs_rors"].map(n_labs)
+    df["n_labs"] = df["labs_rors"].map(n_labs) if "labs_rors" in df.columns else 0
 
     return df
 
-def lab_only(internal: pd.DataFrame, pubs: pd.DataFrame) -> pd.DataFrame:
-    """
-    Keep only the 61 labs (exclude other internal structures).
-    Prefer 'unit_type' == 'lab'; fallback: labs observed in pubs.
-    """
+def keep_only_labs(internal: pd.DataFrame, pubs_all: pd.DataFrame) -> pd.DataFrame:
+    """Keep the 61 'lab' units; fallback to those seen in pubs if 'Unit Type' missing."""
     if "unit_type" in internal.columns:
         labs = internal[internal["unit_type"].astype(str).str.lower().eq("lab")].copy()
     else:
-        seen = set(explode_labs(pubs)["lab_ror"].dropna().unique())
+        seen = set(explode_labs(pubs_all)["lab_ror"].dropna().unique())
         labs = internal[internal["lab_ror"].isin(seen)].copy()
-    # de-dup and sort A–Z
     labs = labs.drop_duplicates(subset=["lab_ror"]).sort_values("lab_name")
     return labs
 
-def compute_per_lab_summary(pubs_1923: pd.DataFrame, internal_labs: pd.DataFrame) -> pd.DataFrame:
+def compute_per_lab_overview(
+    pubs_1923_all: pd.DataFrame,
+    labs_dict: pd.DataFrame,
+    ul_total_works_1923: int,
+) -> pd.DataFrame:
     """
-    Build the per-lab table for 2019–2023:
-      - publications, share of UL, %LUE, %top10, %top1, Avg FWCI_FR,
-        %collab internal, %international, ROR, OpenAlex link
+    Build the per-lab overview (2019–2023), using dict_internal when available:
+      - Publications       -> labs_dict['Total publications'] if present, else count from pubs
+      - % UL               -> labs_dict['% of Lorraine production'] (ratio) if present, else pubs/UL_total
+      - % LUE              -> labs_dict['count of IS_LUE'] / publications (abs ratio) if present, else compute from pubs
+      - % top10/top1       -> from pubs (field-based flags)
+      - Avg FWCI (FR)      -> mean fwci_fr per lab from pubs
+      - % internal collab  -> from pubs: share of works with >=2 labs
+      - % international    -> from labs_dict['International collabs (ratio)'] if present, else pubs
+      - Links              -> ROR + OpenAlex (institution id if available)
     """
-    # Pub-level flags used by grouping
-    plf = compute_pub_level_flags(pubs_1923)
+    # explode lab memberships
+    pubs_flags = compute_pub_level_flags(pubs_1923_all)
+    el = explode_labs(pubs_flags).dropna(subset=["lab_ror"])
 
-    # explode works to (work, lab_ror)
-    el = explode_labs(plf)
-    el = el.dropna(subset=["lab_ror"])
+    per_work = pubs_flags[["openalex_id","in_lue","is_pp10_field","is_pp1_field","fwci_fr","has_international","n_labs"]].drop_duplicates("openalex_id")
+    x = el.merge(per_work, on="openalex_id", how="left")
 
-    # For metrics that are publication-level, we need one row per work
-    # to avoid double-counting per lab.
-    work_flags = plf[["openalex_id", "in_lue", "is_pp10_field", "is_pp1_field", "fwci_fr", "has_international", "n_labs"]].drop_duplicates("openalex_id")
-
-    # Total UL works in 2019–2023 (denominator for share of UL)
-    ul_total = int(plf["openalex_id"].nunique())
-
-    # join flags then aggregate per lab
-    x = el.merge(work_flags, on="openalex_id", how="left")
-
-    g = x.groupby("lab_ror", as_index=False).agg(
+    agg = x.groupby("lab_ror", as_index=False).agg(
         pubs=("openalex_id", "nunique"),
         lue_count=("in_lue", "sum"),
         top10_count=("is_pp10_field", "sum"),
@@ -175,26 +140,49 @@ def compute_per_lab_summary(pubs_1923: pd.DataFrame, internal_labs: pd.DataFrame
         multi_lab_count=("n_labs", lambda s: (s >= 2).sum()),
     )
 
-    # ratios
-    g["share_of_ul"] = (g["pubs"] / ul_total).replace([np.inf, -np.inf], np.nan)
-    g["lue_ratio"] = (g["lue_count"] / g["pubs"]).replace([np.inf, -np.inf], np.nan)
-    g["top10_ratio"] = (g["top10_count"] / g["pubs"]).replace([np.inf, -np.inf], np.nan)
-    g["top1_ratio"] = (g["top1_count"] / g["pubs"]).replace([np.inf, -np.inf], np.nan)
-    g["intl_ratio"] = (g["intl_count"] / g["pubs"]).replace([np.inf, -np.inf], np.nan)
-    g["internal_collab_ratio"] = (g["multi_lab_count"] / g["pubs"]).replace([np.inf, -np.inf], np.nan)
+    # bring dict_internal values where available
+    labs = labs_dict.copy()
+    # Total publications (dict column can be named differently → mapped in data_io)
+    pubs_from_dict = labs.get("pubs_total_internal")
+    share_from_dict = labs.get("share_of_ul_internal")  # ratio (e.g., 0.00667)
 
-    # Add lab names and OpenAlex/ROR links
-    labs = internal_labs[["lab_ror", "lab_name"]].drop_duplicates()
-    # Optional: if your dict_internal has openalex id for the lab
-    if "lab_openalex_id" in internal_labs.columns:
-        labs = labs.merge(internal_labs[["lab_ror","lab_openalex_id"]], on="lab_ror", how="left")
+    out = agg.merge(labs[["lab_ror","lab_name","lab_openalex_id","intl_ratio","lue_count"]], on="lab_ror", how="left")
+
+    # publications
+    out["pubs_final"] = np.where(
+        pubs_from_dict.notna().values if pubs_from_dict is not None else False,
+        labs.set_index("lab_ror").loc[out["lab_ror"], "pubs_total_internal"].to_numpy(),
+        out["pubs"].to_numpy(),
+    ).astype(float)
+
+    # % UL (ratio)
+    if share_from_dict is not None:
+        out["share_of_ul"] = labs.set_index("lab_ror").loc[out["lab_ror"], "share_of_ul_internal"].to_numpy()
     else:
-        labs["lab_openalex_id"] = None
+        out["share_of_ul"] = (out["pubs_final"] / float(ul_total_works_1923)).replace([np.inf, -np.inf], np.nan)
 
-    g = g.merge(labs, on="lab_ror", how="left")
+    # % LUE (abs ratio)
+    if "lue_count" in out.columns and out["lue_count"].notna().any():
+        out["lue_ratio"] = (pd.to_numeric(out["lue_count"], errors="coerce") / out["pubs_final"]).replace([np.inf, -np.inf], np.nan)
+    else:
+        out["lue_ratio"] = (out["lue_count"] / out["pubs_final"]).replace([np.inf, -np.inf], np.nan)
 
+    # % top10 / % top1 from pubs
+    out["top10_ratio"] = (out["top10_count"] / out["pubs_final"]).replace([np.inf, -np.inf], np.nan)
+    out["top1_ratio"]  = (out["top1_count"]  / out["pubs_final"]).replace([np.inf, -np.inf], np.nan)
+
+    # % international: prefer dict ratio, fallback to pubs-based
+    out["intl_ratio_calc"] = (out["intl_count"] / out["pubs_final"]).replace([np.inf, -np.inf], np.nan)
+    if "intl_ratio" in out.columns and out["intl_ratio"].notna().any():
+        out["intl_ratio_final"] = out["intl_ratio"].astype(float)
+    else:
+        out["intl_ratio_final"] = out["intl_ratio_calc"]
+
+    # % internal collab
+    out["internal_collab_ratio"] = (out["multi_lab_count"] / out["pubs_final"]).replace([np.inf, -np.inf], np.nan)
+
+    # Links
     def openalex_institution_url(openalex_id: str | None) -> str:
-        # Per spec, institution ID filter; fallback to ROR-filter if missing.
         if openalex_id:
             return (
                 "https://openalex.org/works?"
@@ -203,26 +191,35 @@ def compute_per_lab_summary(pubs_1923: pd.DataFrame, internal_labs: pd.DataFrame
                 f"publication_year:{YEAR_MIN}-{YEAR_MAX}"
             )
         return ""
+    out["openalex_url"] = out["lab_openalex_id"].map(openalex_institution_url)
+    out["ror_url"] = out["lab_ror"].map(lambda r: f"https://ror.org/{r}" if r else "")
 
-    g["openalex_url"] = g["lab_openalex_id"].apply(openalex_institution_url)
-    g["ror_url"] = g["lab_ror"].apply(lambda r: f"https://ror.org/{r}" if r else "")
+    # Display columns (percent progress)
+    out["share_pct_display"]   = out["share_of_ul"] * 100.0
+    out["lue_pct_display"]     = out["lue_ratio"]   * 100.0
+    out["top10_pct_display"]   = out["top10_ratio"] * 100.0
+    out["top1_pct_display"]    = out["top1_ratio"]  * 100.0
+    out["intl_pct_display"]    = out["intl_ratio_final"] * 100.0
+    out["internal_collab_pct"] = out["internal_collab_ratio"] * 100.0
 
-    # ordering
-    g = g.merge(internal_labs[["lab_ror","lab_name"]], on=["lab_ror","lab_name"], how="left")
-    g = g.sort_values("lab_name")
+    # Sort A–Z
+    out = out.sort_values("lab_name")
 
-    # progress reference maxima (max = best lab)
-    g["share_pct_display"]   = g["share_of_ul"] * 100.0
-    g["lue_pct_display"]     = g["lue_ratio"]   * 100.0
-    g["top10_pct_display"]   = g["top10_ratio"] * 100.0
-    g["top1_pct_display"]    = g["top1_ratio"]  * 100.0
-    g["intl_pct_display"]    = g["intl_ratio"]  * 100.0
-    g["internal_collab_pct"] = g["internal_collab_ratio"] * 100.0
+    # Final selection + renames
+    final = out.rename(columns={
+        "pubs_final": "pubs",
+        "avg_fwci": "avg_fwci",
+    })
 
-    return g, ul_total
+    cols = [
+        "lab_name","lab_ror","pubs",
+        "share_pct_display","lue_pct_display","top10_pct_display","top1_pct_display",
+        "avg_fwci","internal_collab_pct","intl_pct_display",
+        "openalex_url","ror_url",
+    ]
+    return final[cols]
 
-def _ensure_all_fields(df_counts: pd.DataFrame, topics_h: pd.DataFrame) -> pd.DataFrame:
-    # df_counts columns: ['field_id','count']; we must bring all fields (26)
+def ensure_all_fields(df_counts: pd.DataFrame, topics_h: pd.DataFrame) -> pd.DataFrame:
     all_fields = topics_h[["field_id","field_name","domain_name"]].drop_duplicates()
     out = all_fields.merge(df_counts, on="field_id", how="left").fillna({"count": 0})
     out["count"] = out["count"].astype(int)
@@ -230,46 +227,36 @@ def _ensure_all_fields(df_counts: pd.DataFrame, topics_h: pd.DataFrame) -> pd.Da
     out["domain"] = out["domain_name"]
     return out[["field_id","field","domain","count"]]
 
-def field_distribution_for_lab(pubs: pd.DataFrame, lab_ror: str, years: List[int], topics_h: pd.DataFrame) -> pd.DataFrame:
-    """Counts by field for a lab; guarantees 26 rows (all fields) with 0s."""
-    sub = filter_years(pubs, years)
+def field_distribution_for_lab(pubs_all: pd.DataFrame, lab_ror: str, years: List[int], topics_h: pd.DataFrame) -> pd.DataFrame:
+    sub = filter_years(pubs_all, years)
     el = explode_labs(sub)
     sub = sub.merge(el, on=["openalex_id","year"], how="left")
     sub = sub[sub["lab_ror"] == lab_ror].copy()
     if sub.empty:
-        return _ensure_all_fields(pd.DataFrame({"field_id":[],"count":[]}), topics_h)
-
-    # count by primary_field_id
+        return ensure_all_fields(pd.DataFrame({"field_id":[],"count":[]}), topics_h)
     sub["primary_field_id"] = pd.to_numeric(sub["primary_field_id"], errors="coerce")
-    g = sub.groupby("primary_field_id", as_index=False)["openalex_id"].nunique().rename(columns={"openalex_id":"count", "primary_field_id":"field_id"})
-    return _ensure_all_fields(g, topics_h)
+    g = sub.groupby("primary_field_id", as_index=False)["openalex_id"].nunique().rename(columns={"openalex_id":"count","primary_field_id":"field_id"})
+    return ensure_all_fields(g, topics_h)
 
 def chart_fields_horizontal(df_fields: pd.DataFrame, field_order: List[str], domain_palette: Dict[str,str], title: str, normalize: bool = False) -> alt.Chart:
-    """
-    df_fields: ['field','domain','count']
-    normalize: if True, use % of total for the lab, but still print counts next to y-axis.
-    Always show ALL field labels; fixed order; domain colors.
-    """
     df = df_fields.copy()
     df["field"] = df["field"].astype("category")
-    df["field"].cat.set_categories(field_order, inplace=True)
+    # pandas >= 2.1: set_categories returns a new Categorical (no 'inplace' kwarg)
+    df["field"] = df["field"].cat.set_categories(field_order)
     df = df.sort_values("field")
 
     total = df["count"].sum()
     if normalize and total > 0:
         df["value"] = df["count"] / total * 100.0
-        x_title = "% of lab works"
-        x_scale = alt.Scale(domain=[0, 100])
-        fmt = ".1f"
+        x_title, x_scale, fmt = "% of lab works", alt.Scale(domain=[0,100]), ".1f"
     else:
         df["value"] = df["count"]
-        # set a modest headroom for nicer visuals
-        x_title = "Publications"
-        x_scale = alt.Scale(nice=True)
-        fmt = ".0f"
+        x_title, x_scale, fmt = "Publications", alt.Scale(nice=True), ".0f"
 
-    # color by domain
-    color_scale = alt.Scale(domain=list(domain_palette.keys()), range=[domain_palette[d] for d in domain_palette.keys()])
+    color_scale = alt.Scale(
+        domain=list(domain_palette.keys()),
+        range=[domain_palette[d] for d in domain_palette.keys()]
+    )
 
     height = max(26 * 22, 300)
 
@@ -284,34 +271,27 @@ def chart_fields_horizontal(df_fields: pd.DataFrame, field_order: List[str], dom
                 alt.Tooltip("field:N", title="Field"),
                 alt.Tooltip("domain:N", title="Domain"),
                 alt.Tooltip("count:Q", title="Count", format=".0f"),
-                alt.Tooltip("value:Q", title="% (if normalized)", format=".1f"),
+                alt.Tooltip("value:Q", title="% (if normalized)", format=fmt),
             ],
         )
         .properties(title=title, height=height)
     )
 
-    # text with absolute count placed near axis (small)
+    # count labels near y-axis
     text = (
         alt.Chart(df)
         .mark_text(align="left", baseline="middle", dx=5, size=10)
-        .encode(
-            y=alt.Y("field:N", sort=field_order, axis=None),
-            x=alt.value(0),
-            text=alt.Text("count:Q", format=".0f"),
-        )
+        .encode(y=alt.Y("field:N", sort=field_order, axis=None), x=alt.value(0), text=alt.Text("count:Q", format=".0f"))
     )
 
-    return (text + bars)
+    return text + bars
 
-def compute_copubs_between_labs(pubs: pd.DataFrame, lab_left: str, lab_right: str, years: List[int]) -> pd.DataFrame:
-    """Subset of pubs (selected years) that include both labs in labs_rors."""
-    sub = filter_years(pubs, years).copy()
-
+def compute_copubs_between_labs(pubs_all: pd.DataFrame, lab_left: str, lab_right: str, years: List[int]) -> pd.DataFrame:
+    sub = filter_years(pubs_all, years).copy()
     def has_both(labs_s: object) -> bool:
         labs = set(split_positions(labs_s))
         return lab_left in labs and lab_right in labs
-
-    mask = sub["labs_rors"].map(has_both)
+    mask = sub["labs_rors"].map(has_both) if "labs_rors" in sub.columns else False
     return sub.loc[mask].copy()
 
 def kpis_for_copubs(df: pd.DataFrame) -> Dict[str, float]:
@@ -326,16 +306,13 @@ def kpis_for_copubs(df: pd.DataFrame) -> Dict[str, float]:
     )
 
 def stacked_evolution_by_domain(df: pd.DataFrame, topics: pd.DataFrame, domain_palette: Dict[str,str], years: List[int]) -> alt.Chart:
-    """
-    Stacked bar of co-publications per year by domain (primary_domain_id/name).
-    """
     if df.empty:
         return alt.Chart(pd.DataFrame({"year":[], "domain":[],"count":[]})).mark_bar()
 
-    # join domain
     look = topics.drop_duplicates("domain_id")[["domain_id","domain_name"]].rename(columns={"domain_name":"domain"})
-    temp = df[["openalex_id","year","primary_domain_id"]].drop_duplicates()
-    temp = temp.merge(look, left_on="primary_domain_id", right_on="domain_id", how="left")
+    temp = df[["openalex_id","year","primary_domain_id"]].drop_duplicates().merge(
+        look, left_on="primary_domain_id", right_on="domain_id", how="left"
+    )
     g = temp.groupby(["year","domain"], as_index=False)["openalex_id"].nunique().rename(columns={"openalex_id":"count"})
 
     domain_order = sorted(domain_palette.keys())
@@ -354,18 +331,8 @@ def stacked_evolution_by_domain(df: pd.DataFrame, topics: pd.DataFrame, domain_p
     )
 
 def top_authors_from_copubs(copubs: pd.DataFrame, pubs_all_years: pd.DataFrame, years: List[int]) -> pd.DataFrame:
-    """
-    Build top authors table:
-      - Copubs (unique works in the copubs set)
-      - ORCID, Is Lorraine, Lab(s) from dict_authors (if available)
-      - FWCI_FR of the copubs for this author
-      - Total pubs in timeframe (within whole dataset, not just copubs)
-      - FWCI_FR overall (whole dataset)
-    Only 10 top rows are shown on the page; CSV download contains all.
-    """
     rows = []
-    cols_present = {"authors","authors_id"}.issubset(copubs.columns)
-    if cols_present:
+    if {"authors","authors_id"}.issubset(copubs.columns):
         for _, r in copubs[["openalex_id","authors","authors_id","fwci_fr","year"]].iterrows():
             names = [LEAD.sub("", x).strip() for x in str(r["authors"] or "").split("|") if x.strip()]
             ids   = [LEAD.sub("", x).strip() for x in str(r["authors_id"] or "").split("|") if x.strip()]
@@ -377,134 +344,123 @@ def top_authors_from_copubs(copubs: pd.DataFrame, pubs_all_years: pd.DataFrame, 
                 rows.append({"author_id": aid, "Author": nm, "openalex_id": r["openalex_id"], "fwci_fr": r["fwci_fr"], "year": r["year"]})
         ea = pd.DataFrame(rows)
     else:
-        # fallback: explode from core and filter
-        ea = explode_authors(copubs).rename(columns={"author_name":"Author"})
-        ea = ea.merge(copubs[["openalex_id","fwci_fr","year"]], on=["openalex_id"], how="left")
+        ea = explode_authors(copubs).rename(columns={"author_name":"Author"}).merge(
+            copubs[["openalex_id","fwci_fr","year"]], on="openalex_id", how="left"
+        )
 
     if ea.empty:
         return pd.DataFrame(columns=["Author","author_id","ORCID","Copubs","FWCI_FR (copubs)","Total pubs (timeframe)","FWCI_FR (overall)","Is Lorraine","Lab(s)"])
 
-    # Copub counts and FWCI in copubs
     agg = (
         ea.groupby(["author_id","Author"], as_index=False)
           .agg(Copubs=("openalex_id","nunique"), fwci_copubs=("fwci_fr","mean"))
-    ).rename(columns={"fwci_copubs":"FWCI_FR (copubs)"})
+          .rename(columns={"fwci_copubs":"FWCI_FR (copubs)"})
+    )
 
-    # Total pubs in timeframe (within whole dataset)
     ea_all = explode_authors(filter_years(pubs_all_years, years)).rename(columns={"author_name":"Author"})
     tot = ea_all.groupby(["author_id","Author"], as_index=False)["openalex_id"].nunique().rename(columns={"openalex_id":"Total pubs (timeframe)"})
 
-    # Overall stats (whole dataset) from helper
     overall = author_global_metrics(pubs_all_years).rename(columns={
-        "author_id":"author_id",
-        "author_name":"Author",
-        "avg_fwci_overall":"FWCI_FR (overall)",
-        "total_pubs":"Total pubs (overall)"
+        "author_id":"author_id", "author_name":"Author",
+        "avg_fwci_overall":"FWCI_FR (overall)", "total_pubs":"Total pubs (overall)"
     })[["author_id","Author","FWCI_FR (overall)","Total pubs (overall)"]]
 
-    # Optional enrichment from dict_authors
-    lookup = None
+    # Optional enrichment
     try:
         from lib.data_io import load_authors_lookup
-        lookup = load_authors_lookup()
+        lk = load_authors_lookup()
     except Exception:
-        lookup = None
-
-    if lookup is not None and not lookup.empty:
-        lk = lookup.rename(columns={"orcid":"ORCID","is_lorraine":"Is Lorraine","labs_from_dict":"Lab(s)"}).copy()
-        lk = lk[["author_id","ORCID","Is Lorraine","Lab(s)"]]
+        lk = None
+    if lk is not None and not lk.empty:
+        lk = lk.rename(columns={"orcid":"ORCID","is_lorraine":"Is Lorraine","labs_from_dict":"Lab(s)"})[
+            ["author_id","ORCID","Is Lorraine","Lab(s)"]
+        ]
     else:
         lk = pd.DataFrame(columns=["author_id","ORCID","Is Lorraine","Lab(s)"])
 
-    out = (
-        agg.merge(tot, on=["author_id","Author"], how="left")
-           .merge(overall, on=["author_id","Author"], how="left")
-           .merge(lk, on="author_id", how="left")
-    )
+    out = agg.merge(tot, on=["author_id","Author"], how="left") \
+             .merge(overall, on=["author_id","Author"], how="left") \
+             .merge(lk, on="author_id", how="left")
 
-    # Sort by Copubs desc, then by FWCI_FR(copubs)
-    out = out.sort_values(["Copubs","FWCI_FR (copubs)"], ascending=[False, False])
-    return out
+    return out.sort_values(["Copubs","FWCI_FR (copubs)"], ascending=[False, False])
 
 # ------------------------------------------------------------
-# Data load
+# Load data
 # ------------------------------------------------------------
 with st.spinner("Loading data..."):
-    pubs_raw = prepare_core()                  # subset with at least one lab
-    topics = load_topics()                     # topic/subfield/field/domain dictionary
-    internal = load_internal()                 # lab roster + KPIs
-    internal = lab_only(internal, pubs_raw)    # keep only the 61 labs
+    pubs_all = prepare_core()            # all UL works
+    topics = load_topics()
+    internal_raw = load_internal()
+
+    # Keep only labs (no other internal structures) and sort A–Z
+    internal = keep_only_labs(internal_raw, pubs_all)
 
     topics_h, DOMAIN_ORDER, FIELD_ORDER = build_topics_hierarchy(topics)
     DOMAIN_PALETTE = make_domain_palette(DOMAIN_ORDER)
 
+# Core subsets for the fixed topline/table window
+pubs_1923_all = filter_years(pubs_all, YEARS_1923)
+pubs_1923_with_labs = pubs_with_labs(pubs_1923_all)
+
 # ------------------------------------------------------------
-# 1) Topline metrics (fixed: 2019–2023)
+# 1) Topline metrics (against the whole UL dataset, 2019–2023)
 # ------------------------------------------------------------
-pubs_1923 = pubs_raw[(pubs_raw["year"] >= YEAR_MIN) & (pubs_raw["year"] <= YEAR_MAX)].copy()
+UL_TOTAL_1923 = int(pubs_1923_all["openalex_id"].nunique())
+LAB_TOTAL_1923 = int(pubs_1923_with_labs["openalex_id"].nunique())
+coverage_pct = (LAB_TOTAL_1923 / UL_TOTAL_1923 * 100.0) if UL_TOTAL_1923 else 0.0
 
-per_lab, ul_total_1923 = compute_per_lab_summary(pubs_1923, internal)
-
-n_labs = int(internal["lab_ror"].nunique())
-n_lab_pubs = int(pubs_1923["openalex_id"].nunique())
-
-# Coverage (% of the Université they cover) relative to ALL UL pubs 2019–2023 (with at least one lab)
-# NOTE: If you want coverage vs ALL university pubs (including those with no labs), provide that total here.
-coverage_pct = 100.0  # by definition, pubs_1923 is already “subset with at least one lab”
-
-# LUE / top10 / top1 totals (lab subset) and proportion vs UL totals (all pubs_raw)
-lab_lue = int(pubs_1923["in_lue"].sum())
-lab_top10 = int(pubs_1923["is_pp10_field"].sum())
-lab_top1 = int(pubs_1923["is_pp1_field"].sum())
-
-ul_all_1923 = load_core()
-ul_all_1923 = ul_all_1923[(ul_all_1923["year"] >= YEAR_MIN) & (ul_all_1923["year"] <= YEAR_MAX)].copy()
+# Totals across all UL works (not only lab subset)
 for c in ["in_lue","is_pp10_field","is_pp1_field"]:
-    if c in ul_all_1923.columns:
-        ul_all_1923[c] = ul_all_1923[c].fillna(False).astype(bool)
-UL_LUE = int(ul_all_1923["in_lue"].sum()) if "in_lue" in ul_all_1923.columns else lab_lue
-UL_T10 = int(ul_all_1923["is_pp10_field"].sum()) if "is_pp10_field" in ul_all_1923.columns else lab_top10
-UL_T01 = int(ul_all_1923["is_pp1_field"].sum()) if "is_pp1_field" in ul_all_1923.columns else lab_top1
+    if c in pubs_1923_all.columns:
+        pubs_1923_all[c] = pubs_1923_all[c].astype("boolean").fillna(False).astype(bool)
+
+UL_LUE = int(pubs_1923_all["in_lue"].sum()) if "in_lue" in pubs_1923_all.columns else 0
+UL_T10 = int(pubs_1923_all["is_pp10_field"].sum()) if "is_pp10_field" in pubs_1923_all.columns else 0
+UL_T01 = int(pubs_1923_all["is_pp1_field"].sum()) if "is_pp1_field" in pubs_1923_all.columns else 0
+
+LAB_LUE = int(pubs_1923_with_labs["in_lue"].sum()) if "in_lue" in pubs_1923_with_labs.columns else 0
+LAB_T10 = int(pubs_1923_with_labs["is_pp10_field"].sum()) if "is_pp10_field" in pubs_1923_with_labs.columns else 0
+LAB_T01 = int(pubs_1923_with_labs["is_pp1_field"].sum()) if "is_pp1_field" in pubs_1923_with_labs.columns else 0
 
 c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Number of labs", f"{n_labs}")
-c2.metric("Publications covered by labs (2019–2023)", f"{n_lab_pubs:,}", f"{coverage_pct:.0f}% of UL (subset)")
-c3.metric("LUE publications", f"{lab_lue:,}", f"{(lab_lue / UL_LUE * 100.0) if UL_LUE else 0:.1f}% of UL LUE")
-c4.metric("PP top10% publications", f"{lab_top10:,}", f"{(lab_top10 / UL_T10 * 100.0) if UL_T10 else 0:.1f}% of UL top10%")
-c5.metric("PP top1% publications", f"{lab_top1:,}", f"{(lab_top1 / UL_T01 * 100.0) if UL_T01 else 0:.1f}% of UL top1%")
+c1.metric("Number of labs", f"{int(internal['lab_ror'].nunique())}")
+c2.metric("Publications covered by labs (2019–2023)", f"{LAB_TOTAL_1923:,}", f"{coverage_pct:.1f}% of UL")
+c3.metric("LUE publications (labs)", f"{LAB_LUE:,}", f"{(LAB_LUE / UL_LUE * 100.0) if UL_LUE else 0:.1f}% of UL LUE")
+c4.metric("PP top10% (labs)", f"{LAB_T10:,}", f"{(LAB_T10 / UL_T10 * 100.0) if UL_T10 else 0:.1f}% of UL top10%")
+c5.metric("PP top1% (labs)", f"{LAB_T01:,}", f"{(LAB_T01 / UL_T01 * 100.0) if UL_T01 else 0:.1f}% of UL top1%")
 
 st.divider()
 
 # ------------------------------------------------------------
-# 2) Per-lab overview table (fixed: 2019–2023)
+# 2) Per-lab overview table (2019–2023, versus whole UL)
 # ------------------------------------------------------------
-summary = per_lab.copy()
+# Bring dict_internal values (publications, % UL, % LUE (abs), % intl) and compute the rest
+# Map columns in data_io so we have:
+#   lab_ror, lab_name, unit_type, lab_openalex_id, pubs_total_internal, share_of_ul_internal, lue_count, intl_ratio
+# (see “Needed in data_io” section below)
+per_lab = compute_per_lab_overview(
+    pubs_1923_all=pubs_1923_with_labs,   # only pubs that have at least one lab (to compute lab KPIs)
+    labs_dict=internal,
+    ul_total_works_1923=UL_TOTAL_1923,   # denominator for % UL
+)
 
-max_share   = float(summary["share_pct_display"].max() or 1.0)
-max_lue     = float(summary["lue_pct_display"].max() or 1.0)
-max_t10     = float(summary["top10_pct_display"].max() or 1.0)
-max_t01     = float(summary["top1_pct_display"].max() or 1.0)
-max_intl    = float(summary["intl_pct_display"].max() or 1.0)
-max_intcoll = float(summary["internal_collab_pct"].max() or 1.0)
+max_share   = float(per_lab["share_pct_display"].max() or 1.0)
+max_lue     = float(per_lab["lue_pct_display"].max() or 1.0)
+max_t10     = float(per_lab["top10_pct_display"].max() or 1.0)
+max_t01     = float(per_lab["top1_pct_display"].max() or 1.0)
+max_intl    = float(per_lab["intl_pct_display"].max() or 1.0)
+max_intcoll = float(per_lab["internal_collab_pct"].max() or 1.0)
 
-visible_cols = [
-    "lab_name",
-    "pubs",
-    "share_pct_display",
-    "lue_pct_display",
-    "top10_pct_display",
-    "top1_pct_display",
-    "avg_fwci",
-    "internal_collab_pct",
-    "intl_pct_display",
-]
-hidden_cols = ["lab_ror","openalex_url","ror_url"]
-to_show = visible_cols + hidden_cols
-
-st.subheader("Per-lab overview (2019–2023)")
+st.subheader("Per-lab overview (2019–2023) — ratios vs whole UL")
 st.dataframe(
-    summary[to_show],
-    use_container_width=True,
+    per_lab[
+        [
+            "lab_name","pubs","share_pct_display","lue_pct_display","top10_pct_display","top1_pct_display",
+            "avg_fwci","internal_collab_pct","intl_pct_display",
+            "lab_ror","openalex_url","ror_url",
+        ]
+    ],
+    width="stretch",
     hide_index=True,
     column_config={
         "lab_name": "Lab Name",
@@ -526,10 +482,10 @@ st.dataframe(
 st.divider()
 
 # ------------------------------------------------------------
-# 3) Year filter (applies to charts below)
+# 3) Year filter for charts below (applies to sections 4–5)
 # ------------------------------------------------------------
 st.subheader("Charts timeframe")
-years_sel = st.multiselect("Years", YEARS_DEFAULT, default=YEARS_DEFAULT, key="years_for_charts", help="Applies to the charts in sections 4 and 5 below.")
+years_sel = st.multiselect("Years", YEARS_1923, default=YEARS_1923, key="years_for_charts", help="Applies only to sections 4 and 5.")
 if not years_sel:
     st.warning("Select at least one year.")
     st.stop()
@@ -546,27 +502,25 @@ with cL:
     left_label = st.selectbox("Left lab", options=labels, index=0 if labels else 0)
 with cR:
     right_label = st.selectbox("Right lab", options=labels, index=1 if len(labels) > 1 else 0)
-
 if not labels:
     st.info("No labs available.")
     st.stop()
 
 left_ror, right_ror = name2ror[left_label], name2ror[right_label]
 
-# KPIs for each lab in selected years
-def lab_kpis_for_years(pubs: pd.DataFrame, lab_ror: str, years: List[int]) -> Dict[str, int | float]:
-    sub = filter_years(pubs, years)
+def lab_kpis_for_years(pubs_all: pd.DataFrame, lab_ror: str, years: List[int]) -> Dict[str, int | float]:
+    sub = filter_years(pubs_all, years)
     el = explode_labs(sub)
     sub = sub.merge(el, on=["openalex_id","year"], how="left")
     sub = sub[sub["lab_ror"] == lab_ror].copy()
 
     pubs_n = int(sub["openalex_id"].nunique())
-    lue_n  = int(sub["in_lue"].sum())
+    lue_n  = int(sub["in_lue"].sum()) if "in_lue" in sub.columns else 0
     avg_fw = float(pd.to_numeric(sub["fwci_fr"], errors="coerce").mean() or 0.0)
     return {"pubs": pubs_n, "lue": lue_n, "avg_fwci": avg_fw}
 
-kpi_left  = lab_kpis_for_years(pubs_raw, left_ror, years_sel)
-kpi_right = lab_kpis_for_years(pubs_raw, right_ror, years_sel)
+kpi_left  = lab_kpis_for_years(pubs_all, left_ror, years_sel)
+kpi_right = lab_kpis_for_years(pubs_all, right_ror, years_sel)
 
 k1, k2, k3, k4, k5, k6 = st.columns(6)
 k1.metric(f"{left_label} — Publications", f"{kpi_left['pubs']:,}")
@@ -576,21 +530,32 @@ k4.metric(f"{right_label} — Publications", f"{kpi_right['pubs']:,}")
 k5.metric(f"{right_label} — LUE", f"{kpi_right['lue']:,}")
 k6.metric(f"{right_label} — Avg FWCI (FR)", f"{kpi_right['avg_fwci']:.2f}")
 
-# Field distributions (volume and %)
-left_fields  = field_distribution_for_lab(pubs_raw, left_ror, years_sel, topics_h)
-right_fields = field_distribution_for_lab(pubs_raw, right_ror, years_sel, topics_h)
+left_fields  = field_distribution_for_lab(pubs_all, left_ror, years_sel, topics_h)
+right_fields = field_distribution_for_lab(pubs_all, right_ror, years_sel, topics_h)
 
 cA, cB = st.columns(2)
 with cA:
-    st.altair_chart(chart_fields_horizontal(left_fields, FIELD_ORDER, DOMAIN_PALETTE, f"{left_label} — Field distribution (volume)"), use_container_width=True)
+    st.altair_chart(
+        chart_fields_horizontal(left_fields, FIELD_ORDER, DOMAIN_PALETTE, f"{left_label} — Field distribution (volume)"),
+        width="stretch",
+    )
 with cB:
-    st.altair_chart(chart_fields_horizontal(right_fields, FIELD_ORDER, DOMAIN_PALETTE, f"{right_label} — Field distribution (volume)"), use_container_width=True)
+    st.altair_chart(
+        chart_fields_horizontal(right_fields, FIELD_ORDER, DOMAIN_PALETTE, f"{right_label} — Field distribution (volume)"),
+        width="stretch",
+    )
 
 cA, cB = st.columns(2)
 with cA:
-    st.altair_chart(chart_fields_horizontal(left_fields, FIELD_ORDER, DOMAIN_PALETTE, f"{left_label} — Field distribution (% of lab works)", normalize=True), use_container_width=True)
+    st.altair_chart(
+        chart_fields_horizontal(left_fields, FIELD_ORDER, DOMAIN_PALETTE, f"{left_label} — Field distribution (% of lab works)", normalize=True),
+        width="stretch",
+    )
 with cB:
-    st.altair_chart(chart_fields_horizontal(right_fields, FIELD_ORDER, DOMAIN_PALETTE, f"{right_label} — Field distribution (% of lab works)", normalize=True), use_container_width=True)
+    st.altair_chart(
+        chart_fields_horizontal(right_fields, FIELD_ORDER, DOMAIN_PALETTE, f"{right_label} — Field distribution (% of lab works)", normalize=True),
+        width="stretch",
+    )
 
 st.divider()
 
@@ -599,9 +564,9 @@ st.divider()
 # ------------------------------------------------------------
 st.subheader("Collaboration between selected labs")
 
-copubs = compute_copubs_between_labs(pubs_raw, left_ror, right_ror, years_sel)
-
+copubs = compute_copubs_between_labs(pubs_all, left_ror, right_ror, years_sel)
 kpis = kpis_for_copubs(copubs)
+
 c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("Co-publications", f"{kpis['total']:,}")
 c2.metric("LUE", f"{kpis['lue']:,}")
@@ -609,20 +574,19 @@ c3.metric("PP top10%", f"{kpis['top10']:,}")
 c4.metric("PP top1%", f"{kpis['top1']:,}")
 c5.metric("Avg FWCI (FR)", f"{kpis['avg_fwci']:.2f}")
 
-# Evolution stacked by domain
 st.markdown("#### Co-publications by year & domain")
-evo = stacked_evolution_by_domain(copubs, topics, DOMAIN_PALETTE, years_sel)
-st.altair_chart(evo, use_container_width=True)
+st.altair_chart(stacked_evolution_by_domain(copubs, topics, DOMAIN_PALETTE, years_sel), width="stretch")
 
-# Top authors among the copubs
+# Top authors (table + CSV)
 st.markdown("#### Top authors in co-publications")
-top_auth = top_authors_from_copubs(copubs, pubs_raw, years_sel)
+top_auth = top_authors_from_copubs(copubs, pubs_all, years_sel)
 if top_auth.empty:
     st.info("No authors found for the current selection.")
 else:
     st.dataframe(
         top_auth.head(10)[["Author","author_id","ORCID","Copubs","FWCI_FR (copubs)","Total pubs (timeframe)","FWCI_FR (overall)","Is Lorraine","Lab(s)"]],
-        use_container_width=True, hide_index=True,
+        width="stretch",
+        hide_index=True,
         column_config={
             "author_id": st.column_config.TextColumn("Author ID"),
             "Copubs": st.column_config.NumberColumn(format="%.0f"),
@@ -631,37 +595,31 @@ else:
             "FWCI_FR (overall)": st.column_config.NumberColumn(format="%.2f"),
         },
     )
-    csv_all_auth = top_auth.to_csv(index=False).encode("utf-8")
-    st.download_button("Download full authors CSV", data=csv_all_auth, file_name=f"copubs_top_authors_{left_ror}_vs_{right_ror}.csv", mime="text/csv")
+    st.download_button(
+        "Download full authors CSV",
+        data=top_auth.to_csv(index=False).encode("utf-8"),
+        file_name=f"copubs_top_authors_{left_ror}_vs_{right_ror}.csv",
+        mime="text/csv",
+    )
 
-# All co-publications — exportable table
+# All co-publications — exportable
 st.markdown("#### All co-publications (top 10 by citations)")
-
-# Join subfield/field/domain from topics
 look = topics[["topic_id","subfield_id","subfield_name","field_id","field_name","domain_id","domain_name"]].drop_duplicates()
-# primary topic/subfield/field/domain:
 table = copubs.merge(
-    look.rename(columns={
-        "subfield_name":"Subfield",
-        "field_name":"Field",
-        "domain_name":"Domain"
-    }),
-    left_on="primary_subfield_id",
-    right_on="subfield_id",
-    how="left"
+    look.rename(columns={"subfield_name":"Subfield","field_name":"Field","domain_name":"Domain"}),
+    left_on="primary_subfield_id", right_on="subfield_id", how="left"
 )
 
-# Visible by default
 visible_cols = ["year","type","title","in_lue","is_pp10_field","is_pp1_field","Subfield","Field","citation_count"]
 hidden_cols  = ["openalex_id","doi","Domain"]
 cols_present = [c for c in visible_cols + hidden_cols if c in table.columns]
 
-# order & top 10 most cited
 table = table.sort_values(["citation_count","year"], ascending=[False, False])
 
 st.dataframe(
     table[cols_present].head(10),
-    use_container_width=True, hide_index=True,
+    width="stretch",
+    hide_index=True,
     column_config={
         "year": st.column_config.NumberColumn("Publication Year", format="%.0f"),
         "type": "Publication Type",
@@ -675,7 +633,12 @@ st.dataframe(
         "Subfield": "Subfield name",
         "Field": "Field name",
         "Domain": "Domain name",
-    }
+    },
 )
-csv_copubs = table[cols_present].to_csv(index=False).encode("utf-8")
-st.download_button("Download all co-publications (CSV)", data=csv_copubs, file_name=f"copubs_{left_ror}_vs_{right_ror}.csv", mime="text/csv")
+
+st.download_button(
+    "Download all co-publications (CSV)",
+    data=table[cols_present].to_csv(index=False).encode("utf-8"),
+    file_name=f"copubs_{left_ror}_vs_{right_ror}.csv",
+    mime="text/csv",
+)
