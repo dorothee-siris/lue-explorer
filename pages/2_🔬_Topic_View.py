@@ -92,8 +92,8 @@ def make_domain_palette(domain_ids: List[int], topics: pd.DataFrame) -> Dict[str
 
 def whisker_chart(df: pd.DataFrame, y_field: str, color_field: str, title: str, log=True, palette=None, fixed_order=None, height=None):
     """
-    df needs: [y_field, 'min','q1','median','q3','max', color_field]
-    Horizontal whiskers; log axis optional.
+    df columns required: [y_field, 'min','q1','median','q3','max', color_field]
+    Horizontal box-with-whiskers; log scale optional.
     """
     data = df.copy()
     eps = 1e-3
@@ -137,11 +137,16 @@ def whisker_chart(df: pd.DataFrame, y_field: str, color_field: str, title: str, 
         color=alt.value("#111"),
     )
 
-    return (rule + box + tick).properties(title=title, height=height or max(26 * len(cat_order), 240))
+    return (rule + box + tick).properties(
+        title=title,
+        height=height or max(26 * len(cat_order), 240),
+        width="container",  # <- responsive width inside the element
+    )
+
 
 def percent_bar_with_counts(df, y, pct_col, count_col, title, color_value, order=None, height=None):
     """
-    Horizontal bars for percentages, with absolute count printed near the y-axis.
+    Horizontal bars for percentages, with the absolute count printed near the y-axis.
     df[pct_col] expected in 0..1
     """
     data = df.copy()
@@ -161,7 +166,11 @@ def percent_bar_with_counts(df, y, pct_col, count_col, title, color_value, order
         text=alt.Text(f"{count_col}:Q", format=".0f"),
     )
 
-    return (text + bars).properties(title=title, height=height or max(26*len(data), 240))
+    return (text + bars).properties(
+        title=title,
+        height=height or max(26*len(data), 240),
+        width="container",  # <- responsive width inside the element
+    )
 
 def openalex_for_domain(domain_id: int) -> str:
     return (
@@ -311,7 +320,7 @@ with tab_domains:
             wh, y_field="Domain", color_field="color_key", title="FWCI_FR (log) — domains",
             log=True, palette=DOMAIN_PALETTE, fixed_order=[(DOMAIN_NAME_MAP.get(d) or "") for d in DOMAIN_ORDER]
         ),
-        width="stretch",
+        use_container_width=True,
     )
 
     st.divider()
@@ -352,7 +361,7 @@ with tab_domains:
                     title=f"{sel_label} — labs’ share of domain (≥2%)",
                     color_value=sel_color, order=order, height=max(26*len(order), 240)
                 ),
-                width="stretch",
+                use_container_width=True,
             )
 
     # Whiskers by lab for selected domain (only those shown at left)
@@ -378,7 +387,7 @@ with tab_domains:
                     y_field="lab_label", color_field="Domain", title=f"{sel_label} — FWCI_FR spread for labs (log)",
                     log=True, palette={sel_label: sel_color}, fixed_order=labs["lab_label"].tolist(), height=max(26*len(labs), 240)
                 ),
-                width="stretch",
+                use_container_width=True,
             )
 
     st.divider()
@@ -497,7 +506,7 @@ with tab_domains:
             title=f"{sel_label} — field mix (% of domain)",
             color_value=sel_color, order=order_fields, height=max(26*len(order_fields), 260)
         ),
-        width="stretch",
+        use_container_width=True,
     )
 
 # ====== FIELDS TAB ======
@@ -603,7 +612,7 @@ with tab_fields:
                     title=f"{sel_field_label} — labs’ share of field (≥2%)",
                     color_value=sel_field_color, order=order, height=max(26*len(order), 240)
                 ),
-                width="stretch",
+                use_container_width=True,
             )
 
     # Whiskers by lab for selected field (only those shown at left)
@@ -628,7 +637,7 @@ with tab_fields:
                     y_field="lab_label", color_field="Domain", title=f"{sel_field_label} — FWCI_FR spread for labs (log)",
                     log=True, palette={str(sel_field_domain): sel_field_color}, fixed_order=labs_f["lab_label"].tolist(), height=max(26*len(labs_f), 240)
                 ),
-                width="stretch",
+                use_container_width=True,
             )
 
     st.divider()
@@ -748,5 +757,5 @@ with tab_fields:
             title=f"{sel_field_label} — subfield mix (% of field)",
             color_value=sel_field_color, order=order_sub, height=max(26*len(order_sub), 260)
         ),
-        width="stretch",
+        use_container_width=True,
     )
