@@ -134,7 +134,7 @@ def plot_whisker(
             x=alt.X(f"{qcols['min']}:Q", scale=xscale, title=title),
             x2=f"{qcols['max']}:Q",
             color=alt.Color("__color__:N", scale=None, legend=None),
-            tooltip=list(base.columns),
+            tooltip = [alt.Tooltip(c, type="nominal") for c in base.columns],
         )
     )
 

@@ -101,22 +101,32 @@ show_table(dom_df[advanced_cols if show_adv else visible_cols], column_config=cf
 download_csv_button(dom_df, "Download domain overview (CSV)", "domains_overview.csv")
 
 # ============================================================================
-# 2) DOMAIN FWCI WHISKERS (log x)
-# ============================================================================
+# 2) Domain FWCI whiskers (log scale) — SAFE subset to avoid ":" in tooltips
 st.subheader("FWCI (France) distribution by domain")
-qcols = {"min": "FWCI_FR min", "q1": "FWCI_FR Q1", "q2": "FWCI_FR Q2", "q3": "FWCI_FR Q3", "max": "FWCI_FR max"}
+qcols = {
+    "min": "FWCI_FR min",
+    "q1":  "FWCI_FR Q1",
+    "q2":  "FWCI_FR Q2",
+    "q3":  "FWCI_FR Q3",
+    "max": "FWCI_FR max",
+}
+
+# Only keep the columns the chart actually uses → prevents Altair from parsing "By …: …" headers
+_whisker_df = domains[["Domain name", qcols["min"], qcols["q1"], qcols["q2"], qcols["q3"], qcols["max"]]].copy()
+
 st.altair_chart(
     plot_whisker(
-        domains.rename(columns={"Domain name": "Domain"}),
-        label_col="Domain",
+        _whisker_df,
+        label_col="Domain name",
         qcols=qcols,
-        domain_col="Domain",
+        domain_col="Domain name",
         title="FWCI (France) — min / Q1 / median / Q3 / max (log scale)",
         log_x=True,
-        order=order,
+        order=lookups.get("domain_order"),
     ),
     use_container_width=True,
 )
+
 
 # ============================================================================
 # 3) DRILLDOWN BY DOMAIN
