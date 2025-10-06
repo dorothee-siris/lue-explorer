@@ -99,13 +99,11 @@ def plot_whisker(
     qcols: Dict[str, str],
     domain_col: Optional[str],
     title: str,
-    log_x: bool = True,
     order: Optional[List[str]] = None,
 ) -> alt.Chart:
     """
     Whisker plot with min/Q1/median/Q3/max.
     qcols keys: {'min','q1','q2','q3','max'} -> column names
-    If log_x=True, values <= 0 are clipped to a small epsilon for rendering.
     """
     base = df.copy()
     base[label_col] = base[label_col].astype(str)
@@ -116,14 +114,8 @@ def plot_whisker(
     base = _apply_domain_colors(base, domain_col)
     height = _dynamic_height(len(base))
 
-    # Log safety: clip non-positive values to a small epsilon
-    if log_x:
-        eps = 1e-3
-        for key in ("min", "q1", "q2", "q3", "max"):
-            col = qcols[key]
-            base[col] = base[col].where(base[col] > eps, eps)
-
-    xscale = alt.Scale(type="log") if log_x else alt.Scale()
+    # No log scale, using linear scale by default
+    xscale = alt.Scale()
 
     # Whisker (min..max)
     rules = (
@@ -162,3 +154,4 @@ def plot_whisker(
     )
 
     return rules + boxes + median
+
