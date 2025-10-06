@@ -184,11 +184,11 @@ def _lab_q(col):
 if all(k in drow for k in ["By lab: FWCI_FR min", "By lab: FWCI_FR Q1", "By lab: FWCI_FR Q2", "By lab: FWCI_FR Q3", "By lab: FWCI_FR max"]):
     qdf = pd.DataFrame({
         "ROR": labs["ROR"].tolist(),
-        "min": _lab_q("By lab: FWCI_FR min").reindex(labs["ROR"]).values,
+        "min": _lab_q("By lab: FWCI_FR p5").reindex(labs["ROR"]).values,
         "q1":  _lab_q("By lab: FWCI_FR Q1").reindex(labs["ROR"]).values,
         "q2":  _lab_q("By lab: FWCI_FR Q2").reindex(labs["ROR"]).values,
         "q3":  _lab_q("By lab: FWCI_FR Q3").reindex(labs["ROR"]).values,
-        "max": _lab_q("By lab: FWCI_FR max").reindex(labs["ROR"]).values,
+        "max": _lab_q("By lab: FWCI_FR p95").reindex(labs["ROR"]).values,
     })
     qdf = _join_lab_names(qdf, units)
     qdf["domain_name"] = sel_domain
