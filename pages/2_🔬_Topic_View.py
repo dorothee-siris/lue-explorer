@@ -57,36 +57,38 @@ topics = core["topics"].copy()
 lookups = build_taxonomy_lookups()  # domain_order, fields_by_domain, subfields_by_field, etc.
 
 st.title("🔬 Topic View")
-st.caption("Domain palette drives colors. Labels always visible. % charts show counts in the left gutter. FWCI whiskers use min/Q1/median/Q3/max on a log scale.")
+st.caption("Domain palette drives colors. Labels always visible. % charts show counts in the left gutter.")
 
 # ============================================================================
 # 1) DOMAIN OVERVIEW TABLE  (with renames + visibility rules you requested)
 # ============================================================================
 st.subheader("Domain overview")
 
-# Build the display DataFrame with required labels & order
+# Canonical domain ordering from taxonomy — but keep only domains present in the data
 dom_df = pd.DataFrame({
     "Domain": domains["Domain name"],
     "Publications": domains["Pubs"],
     "% UL": domains["% Pubs (uni level)"].apply(_pct_0_100),
-    "Pubs LUE": domains["Pubs LUE"] if "Pubs LUE" in domains.columns else pd.Series([math.nan]*len(domains)),
+    "Pubs LUE": domains.get("Pubs LUE", pd.Series([math.nan]*len(domains))),
     "% Pubs LUE": domains["% Pubs LUE (domain level)"].apply(_pct_0_100),
     "% PPtop10%": domains["% PPtop10% (domain level)"].apply(_pct_0_100),
     "% PPtop1%": domains["% PPtop1% (domain level)"].apply(_pct_0_100),
     "% internal collaboration": domains["% internal collaboration"].apply(_pct_0_100),
     "% international": domains["% international"].apply(_pct_0_100),
-    # hidden by default (still available behind the toggle)
-    "Avg. FWCI (France)": domains["Avg FWCI (France)"] if "Avg FWCI (France)" in domains.columns else pd.Series([math.nan]*len(domains)),
+    "Avg. FWCI (France)": domains.get("Avg FWCI (France)", pd.Series([math.nan]*len(domains))),
     "% Pubs LUE (uni level)": domains["% Pubs LUE (uni level)"].apply(_pct_0_100),
     "% PPtop10% (uni level)": domains["% PPtop10% (uni level)"].apply(_pct_0_100),
     "% PPtop1% (uni level)": domains["% PPtop1% (uni level)"].apply(_pct_0_100),
     "See in OpenAlex": domains.get("See in OpenAlex", ""),
 })
 
-# Canonical domain ordering from taxonomy
-order = [d for d in lookups["domain_order"] if d in dom_df["Domain"].tolist()]
-if order:
-    dom_df = dom_df.set_index("Domain").loc[order].reset_index()
+# Clean key and reindex safely
+dom_df["__key"] = dom_df["Domain"].astype(str).str.strip()
+present = set(dom_df["__key"])
+order_clean = [d.strip() for d in lookups.get("domain_order", []) if d.strip() in present]
+
+if order_clean:
+    dom_df = dom_df.set_index("__key").reindex(order_clean).reset_index(drop=True)
 
 visible_cols = ["Domain", "Publications", "% UL", "Pubs LUE", "% Pubs LUE",
                 "% PPtop10%", "% PPtop1%", "% internal collaboration", "% international"]
@@ -98,10 +100,11 @@ cfg = progressify(dom_df, ["% UL", "% Pubs LUE", "% PPtop10%", "% PPtop1%", "% i
                            "% Pubs LUE (uni level)", "% PPtop10% (uni level)", "% PPtop1% (uni level)"])
 
 show_table(dom_df[advanced_cols if show_adv else visible_cols], column_config=cfg)
+
 download_csv_button(dom_df, "Download domain overview (CSV)", "domains_overview.csv")
 
 # ============================================================================
-# 2) Domain FWCI whiskers (log scale) — SAFE subset to avoid ":" in tooltips
+# 2) Domain FWCI whiskers — SAFE subset to avoid ":" in tooltips
 st.subheader("FWCI (France) distribution by domain")
 qcols = {
     "min": "FWCI_FR min",
@@ -120,8 +123,7 @@ st.altair_chart(
         label_col="Domain name",
         qcols=qcols,
         domain_col="Domain name",
-        title="FWCI (France) — min / Q1 / median / Q3 / max (log scale)",
-        log_x=True,
+        title="FWCI (France) distribution by domain",
         order=lookups.get("domain_order"),
     ),
     use_container_width=True,
@@ -132,7 +134,7 @@ st.altair_chart(
 # 3) DRILLDOWN BY DOMAIN
 # ============================================================================
 st.subheader("Drill down by domain")
-sel_domain = st.selectbox("Pick a domain", options=order or dom_df["Domain"].tolist(), index=0)
+sel_domain = st.selectbox("Pick a domain", dom_df["Domain"].tolist(), index=0)
 drow = domains.loc[domains["Domain name"] == sel_domain].iloc[0]
 
 # --- Labs contribution (left) + FWCI whiskers for the same labs (right)
@@ -185,8 +187,7 @@ if all(k in drow for k in ["By lab: FWCI_FR min", "By lab: FWCI_FR Q1", "By lab:
                 label_col="Label",
                 qcols={"min":"min","q1":"q1","q2":"q2","q3":"q3","max":"max"},
                 domain_col="domain_name",
-                title="FWCI (France) by lab (log scale)",
-                log_x=True,
+                title="FWCI (France) distribution by lab",
                 order=lab_order,
             ),
             use_container_width=True,
@@ -233,64 +234,72 @@ show_table(int_df, column_config=progressify(int_df, ["Share of UL–partner cop
 
 # --- Top 20 authors (with added “Total pubs (at UL)” and derived %; ORCID/ID hidden by default)
 st.markdown("##### Top 20 authors")
+
+def _pad_to(lst, n, fill=None):
+    lst = list(lst or [])
+    return (lst + [fill] * max(0, n - len(lst)))[:n]
+
 auth_names = _explode(drow["Top 20 authors (name)"])
-auth_pubs = [int(x) if x else 0 for x in _explode(drow["Top 20 authors (pubs)"])]
-auth_fwci = [float(x) if x else float("nan") for x in _explode(drow["Top 20 authors (Average FWCI_FR)"])]
-auth_top10 = [int(x) if x else 0 for x in _explode(drow["Top 20 authors (PPtop10% Count)"])]
-auth_top1 = [int(x) if x else 0 for x in _explode(drow["Top 20 authors (PPtop1% Count)"])]
-auth_is_lorraine = _explode(drow["Top 20 authors (Is Lorraine)"])
-auth_orcid = _explode(drow.get("Top 20 authors (Orcid)", ""))
-auth_ids   = _explode(drow.get("Top 20 authors (ID)", ""))
+if not auth_names:
+    st.info("No authors listed for this domain.")
+else:
+    n = len(auth_names)
 
-top_df = pd.DataFrame({
-    "Author": auth_names,
-    "Pubs in this domain": auth_pubs,
-    "Avg. FWCI (France)": auth_fwci,  # rename per request
-    "PPtop10% Count": auth_top10,
-    "PPtop1% Count": auth_top1,
-    "Is Lorraine": auth_is_lorraine,
-    "ORCID": auth_orcid,
-    "Author ID": auth_ids,
-})
+    auth_pubs        = _pad_to([int(x) if x else 0 for x in _explode(drow["Top 20 authors (pubs)"])], n, 0)
+    auth_fwci        = _pad_to([float(x) if x else float("nan") for x in _explode(drow["Top 20 authors (Average FWCI_FR)"])], n, float("nan"))
+    auth_top10       = _pad_to([int(x) if x else 0 for x in _explode(drow["Top 20 authors (PPtop10% Count)"])], n, 0)
+    auth_top1        = _pad_to([int(x) if x else 0 for x in _explode(drow["Top 20 authors (PPtop1% Count)"])], n, 0)
+    auth_is_lorraine = _pad_to([str(x).strip().lower()=="true" for x in _explode(drow["Top 20 authors (Is Lorraine)"])], n, False)
+    auth_orcid       = _pad_to(_explode(drow.get("Top 20 authors (Orcid)", "")), n, "")
+    auth_ids         = _pad_to(_explode(drow.get("Top 20 authors (ID)", "")), n, "")
 
-# Bring “Total pubs (at UL)” from authors table via ORCID first, then Author ID
-authors_long = []
-if "ORCID" in authors.columns:
-    for _, r in authors.iterrows():
-        for o in _explode(r["ORCID"], sep="|"):
-            authors_long.append({"Key": o, "Kind": "ORCID", "Total pubs (at UL)": r.get("Publications (unique)", pd.NA)})
-if "Author ID" in authors.columns:
-    for _, r in authors.iterrows():
-        for a in _explode(r["Author ID"], sep="|"):
-            authors_long.append({"Key": a, "Kind": "Author ID", "Total pubs (at UL)": r.get("Publications (unique)", pd.NA)})
-authors_long = pd.DataFrame(authors_long)
+    top_df = pd.DataFrame({
+        "Author": auth_names,
+        "Pubs in this domain": auth_pubs,
+        "Avg. FWCI (France)": auth_fwci,
+        "PPtop10% Count": auth_top10,
+        "PPtop1% Count": auth_top1,
+        "Is Lorraine": auth_is_lorraine,
+        "ORCID": auth_orcid,
+        "Author ID": auth_ids,
+    })
 
-enriched = top_df.copy()
-enriched["Total pubs (at UL)"] = pd.NA
-# ORCID match
-if not authors_long.empty:
-    m_orcid = enriched.merge(authors_long[authors_long["Kind"]=="ORCID"][["Key","Total pubs (at UL)"]],
-                             left_on="ORCID", right_on="Key", how="left").drop(columns=["Key"])
-    enriched["Total pubs (at UL)"] = m_orcid["Total pubs (at UL)"]
-    # Backfill by Author ID
-    miss = enriched["Total pubs (at UL)"].isna()
-    if miss.any():
-        m_id = enriched[miss].merge(authors_long[authors_long["Kind"]=="Author ID"][["Key","Total pubs (at UL)"]],
-                                    left_on="Author ID", right_on="Key", how="left").drop(columns=["Key"])
-        enriched.loc[miss, "Total pubs (at UL)"] = m_id["Total pubs (at UL)"].values
+    # Bring “Total pubs (at UL)” from authors table via ORCID first, then Author ID
+    authors_long = []
+    if "ORCID" in authors.columns:
+        for _, r in authors.iterrows():
+            for o in _explode(r["ORCID"], sep="|"):
+                authors_long.append({"Key": o, "Kind": "ORCID", "Total pubs (at UL)": r.get("Publications (unique)", pd.NA)})
+    if "Author ID" in authors.columns:
+        for _, r in authors.iterrows():
+            for a in _explode(r["Author ID"], sep="|"):
+                authors_long.append({"Key": a, "Kind": "Author ID", "Total pubs (at UL)": r.get("Publications (unique)", pd.NA)})
+    authors_long = pd.DataFrame(authors_long)
 
-enriched["Total pubs (at UL)"] = pd.to_numeric(enriched["Total pubs (at UL)"], errors="coerce")
-enriched["% Pubs in this domain"] = (
-    (enriched["Pubs in this domain"] / enriched["Total pubs (at UL)"]).fillna(0.0).replace([math.inf, -math.inf], 0.0) * 100.0
-)
+    enriched = top_df.copy()
+    enriched["Total pubs (at UL)"] = pd.NA
+    if not authors_long.empty:
+        m_orcid = enriched.merge(authors_long[authors_long["Kind"]=="ORCID"][["Key","Total pubs (at UL)"]],
+                                 left_on="ORCID", right_on="Key", how="left").drop(columns=["Key"])
+        enriched["Total pubs (at UL)"] = m_orcid["Total pubs (at UL)"]
+        miss = enriched["Total pubs (at UL)"].isna()
+        if miss.any():
+            m_id = enriched[miss].merge(authors_long[authors_long["Kind"]=="Author ID"][["Key","Total pubs (at UL)"]],
+                                        left_on="Author ID", right_on="Key", how="left").drop(columns=["Key"])
+            enriched.loc[miss, "Total pubs (at UL)"] = m_id["Total pubs (at UL)"].values
 
-auth_basic = ["Author", "Pubs in this domain", "Total pubs (at UL)", "% Pubs in this domain",
-              "Avg. FWCI (France)", "PPtop10% Count", "PPtop1% Count", "Is Lorraine"]
-auth_all = auth_basic + ["ORCID", "Author ID"]
+    enriched["Total pubs (at UL)"] = pd.to_numeric(enriched["Total pubs (at UL)"], errors="coerce")
+    # Avoid div-by-0 and NaN
+    denom = enriched["Total pubs (at UL)"].replace(0, pd.NA)
+    enriched["% Pubs in this domain"] = ((enriched["Pubs in this domain"] / denom).fillna(0.0) * 100.0).clip(lower=0)
 
-show_ids = st.toggle("Show ORCID and Author ID", False, key="authors_ids_toggle")
-show_table(enriched[auth_all if show_ids else auth_basic],
-           column_config=progressify(enriched, ["% Pubs in this domain"]))
+    auth_basic = ["Author", "Pubs in this domain", "Total pubs (at UL)", "% Pubs in this domain",
+                  "Avg. FWCI (France)", "PPtop10% Count", "PPtop1% Count", "Is Lorraine"]
+    auth_all = auth_basic + ["ORCID", "Author ID"]
+
+    show_ids = st.toggle("Show ORCID and Author ID", False, key="authors_ids_toggle")
+    show_table(enriched[auth_all if show_ids else auth_basic],
+               column_config=progressify(enriched, ["% Pubs in this domain"]))
 
 # --- Field distribution inside the selected domain
 st.markdown("##### Thematic shape — fields within this domain")
