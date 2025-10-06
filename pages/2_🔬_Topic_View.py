@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from lib.data_io import load_parquet  # uses your existing helper
+from lib.data_io import load_parquet, load_authors_lookup  # uses your existing helpers
 
 st.set_page_config(page_title="Topic View", page_icon="📚", layout="wide")
 st.title("📚 Topic View")
@@ -90,17 +90,31 @@ def make_domain_palette(domain_ids: List[int], topics: pd.DataFrame) -> Dict[str
         palette[str(row["domain_name"])] = base[i % len(base)]
     return palette
 
-def whisker_chart(df: pd.DataFrame, y_field: str, color_field: str, title: str, log=True, palette=None, fixed_order=None, height=None):
+def whisker_chart(
+    df: pd.DataFrame,
+    y_field: str,
+    color_field: str,
+    title: str,
+    log: bool = False,                # <- normal scale by default
+    palette: dict | None = None,
+    fixed_order: list[str] | None = None,
+    height: int | None = None,
+    count_col: str | None = None,     # <- optional count labels at left
+):
     """
     df columns required: [y_field, 'min','q1','median','q3','max', color_field]
-    Horizontal box-with-whiskers; log scale optional.
+    Horizontal box-with-whiskers; optional log scale.
+    Always shows y-labels; prints counts at left if `count_col` exists.
     """
     data = df.copy()
-    eps = 1e-3
+    eps = 1e-6
     for c in ["min","q1","median","q3","max"]:
         data[c] = pd.to_numeric(data[c], errors="coerce")
         if log:
             data[c] = data[c].clip(lower=eps)
+
+    if count_col and count_col in data.columns:
+        data[count_col] = pd.to_numeric(data[count_col], errors="coerce").fillna(0).astype(int)
 
     cat_order = fixed_order if fixed_order is not None else data[y_field].tolist()
 
@@ -114,35 +128,58 @@ def whisker_chart(df: pd.DataFrame, y_field: str, color_field: str, title: str, 
         min_x="datum.min", max_x="datum.max", q1_x="datum.q1", q3_x="datum.q3", med_x="datum.median"
     )
 
+    x_enc = alt.X(
+        "min:Q",
+        title="FWCI_FR (log)" if log else "FWCI_FR",
+        scale=alt.Scale(type="log") if log else alt.Scale(nice=True),
+    )
+    axis_y = alt.Y(f"{y_field}:N", sort=cat_order, axis=alt.Axis(title=None, labelLimit=9999))
+
     rule = base.mark_rule().encode(
-        y=alt.Y(f"{y_field}:N", sort=cat_order, axis=alt.Axis(title=None, labelLimit=1000)),
-        x=alt.X("min:Q", title="FWCI_FR (log)" if log else "FWCI_FR", scale=alt.Scale(type="log") if log else alt.Scale(nice=True)),
+        y=axis_y,
+        x=x_enc,
         x2="max:Q",
         color=alt.Color(f"{color_field}:N", legend=None, scale=color_scale) if color_field else alt.value("#888"),
-        tooltip=[y_field, alt.Tooltip("min:Q", title="Min", format=".2f"), alt.Tooltip("q1:Q", title="Q1", format=".2f"),
-                 alt.Tooltip("median:Q", title="Median", format=".2f"), alt.Tooltip("q3:Q", title="Q3", format=".2f"),
-                 alt.Tooltip("max:Q", title="Max", format=".2f")],
+        tooltip=[y_field,
+                 alt.Tooltip("min:Q", title="Min", format=".2f"),
+                 alt.Tooltip("q1:Q", title="Q1", format=".2f"),
+                 alt.Tooltip("median:Q", title="Median", format=".2f"),
+                 alt.Tooltip("q3:Q", title="Q3", format=".2f"),
+                 alt.Tooltip("max:Q", title="Max", format=".2f")] + (
+                    [alt.Tooltip(f"{count_col}:Q", title="Pubs", format=",")] if count_col else []
+                 ),
     )
 
     box = base.mark_bar(size=10, opacity=0.6).encode(
-        y=alt.Y(f"{y_field}:N", sort=cat_order, axis=None),
+        y=axis_y,
         x=alt.X("q1:Q"),
         x2="q3:Q",
         color=alt.Color(f"{color_field}:N", legend=None, scale=color_scale) if color_field else alt.value("#888"),
     )
 
     tick = base.mark_tick(thickness=2, size=20).encode(
-        y=alt.Y(f"{y_field}:N", sort=cat_order, axis=None),
+        y=axis_y,
         x=alt.X("median:Q"),
         color=alt.value("#111"),
     )
 
-    return (rule + box + tick).properties(
+    layers = [rule, box, tick]
+
+    # Optional left labels with counts (fixed pixel gutter)
+    if count_col and count_col in data.columns:
+        txt = alt.Chart(data).mark_text(align="left", baseline="middle", dx=6, size=10).encode(
+            y=axis_y,
+            x=alt.value(0),  # left gutter
+            text=alt.Text(f"{count_col}:Q", format=","),
+        )
+        layers.insert(0, txt)
+
+    return alt.layer(*layers).properties(
         title=title,
         height=height or max(26 * len(cat_order), 240),
-        width="container",  # <- responsive width inside the element
+        width="container",
+        padding={"left": 80, "right": 6, "top": 4, "bottom": 4},
     )
-
 
 def percent_bar_with_counts(df, y, pct_col, count_col, title, color_value, order=None, height=None):
     """
@@ -154,22 +191,24 @@ def percent_bar_with_counts(df, y, pct_col, count_col, title, color_value, order
     data[count_col] = pd.to_numeric(data[count_col], errors="coerce").fillna(0)
 
     bars = alt.Chart(data).mark_bar().encode(
-        y=alt.Y(f"{y}:N", sort=order, axis=alt.Axis(title=None, labelLimit=1000)),
+        y=alt.Y(f"{y}:N", sort=order, axis=alt.Axis(title=None, labelLimit=9999)),
         x=alt.X("pct_display:Q", title="%", scale=alt.Scale(domain=[0, float(max(1.0, data['pct_display'].max()))])),
         color=alt.value(color_value),
-        tooltip=[y, alt.Tooltip("pct_display:Q", title="%", format=".1f"), alt.Tooltip(f"{count_col}:Q", title="Count", format=".0f")],
+        tooltip=[y, alt.Tooltip("pct_display:Q", title="%", format=".1f"),
+                 alt.Tooltip(f"{count_col}:Q", title="Pubs", format=",")],
     )
 
-    text = alt.Chart(data).mark_text(align="left", baseline="middle", dx=5, size=10).encode(
+    text = alt.Chart(data).mark_text(align="left", baseline="middle", dx=6, size=10).encode(
         y=alt.Y(f"{y}:N", sort=order, axis=None),
         x=alt.value(0),
-        text=alt.Text(f"{count_col}:Q", format=".0f"),
+        text=alt.Text(f"{count_col}:Q", format=","),
     )
 
     return (text + bars).properties(
         title=title,
         height=height or max(26*len(data), 240),
-        width="container",  # <- responsive width inside the element
+        width="container",
+        padding={"left": 80, "right": 6, "top": 4, "bottom": 4},
     )
 
 def openalex_for_domain(domain_id: int) -> str:
@@ -198,6 +237,7 @@ with st.spinner("Loading indicators..."):
     FI = load_parquet("ul_fields_indicators.parquet").copy()
     TOP = load_parquet("all_topics.parquet").copy()
     UNITS = load_parquet("ul_units_indicators.parquet").copy()
+    AUTH = load_authors_lookup()  # optional enrichment (may be None)
 
 # Lab name lookups from ul_units_indicators
 LAB_NAMES = (UNITS[["ROR","Unit Name"]]
@@ -262,52 +302,57 @@ with tab_domains:
     max_t01_d = _max(DI["% PPtop1% (domain level)"])
     max_coll  = _max(DI["% internal collaboration"])
     max_intl  = _max(DI["% international"])
-    max_ind   = _max(DI["% industrial"])
 
-    max_lue_ul = _max(DI["% Pubs LUE (uni level)"])
-    max_t10_ul = _max(DI["% PPtop10% (uni level)"])
-    max_t01_ul = _max(DI["% PPtop1% (uni level)"])
-
-    dom_cols = [
-        "Domain ID","Domain name","Pubs",
-        "% Pubs (uni level)","% Pubs LUE (domain level)","% PPtop10% (domain level)","% PPtop1% (domain level)",
-        "% internal collaboration","% international","% industrial",
+    # Build table with your desired *visible-by-default* columns and labels
+    dom_tbl = DI[[
+        "Domain name","Pubs","% Pubs (uni level)","Pubs LUE",
+        "% Pubs LUE (domain level)","% PPtop10% (domain level)","% PPtop1% (domain level)",
+        "% internal collaboration","% international",
+        # keep other columns present but hidden by column_order
         "Avg FWCI (France)","% Pubs LUE (uni level)","% PPtop10% (uni level)","% PPtop1% (uni level)","See in OpenAlex"
-    ]
-    dom_tbl = DI[dom_cols].copy()
+    ]].copy()
 
     # convert to display percent
     for c in ["% Pubs (uni level)","% Pubs LUE (domain level)","% PPtop10% (domain level)","% PPtop1% (domain level)",
-              "% internal collaboration","% international","% industrial",
+              "% internal collaboration","% international",
               "% Pubs LUE (uni level)","% PPtop10% (uni level)","% PPtop1% (uni level)"]:
         if c in dom_tbl.columns:
             dom_tbl[c] = pd.to_numeric(dom_tbl[c], errors="coerce") * 100.0
+
+    visible_cols = [
+        "Domain name","Pubs","% Pubs (uni level)","Pubs LUE",
+        "% Pubs LUE (domain level)","% PPtop10% (domain level)","% PPtop1% (domain level)",
+        "% internal collaboration","% international",
+    ]
 
     st.dataframe(
         dom_tbl,
         width="stretch",
         hide_index=True,
+        column_order=visible_cols,  # show only these by default
         column_config={
-            "Domain ID": st.column_config.NumberColumn("Domain ID", format="%.0f"),
-            "Domain name": "Domain name",
-            "Pubs": st.column_config.NumberColumn("Publication counts", format="%.0f"),
-            "% Pubs (uni level)": st.column_config.ProgressColumn("% Pubs (uni level)", min_value=0.0, max_value=max_uni, format="%.1f%%"),
-            "% Pubs LUE (domain level)": st.column_config.ProgressColumn("% Pubs LUE (domain level)", min_value=0.0, max_value=max_lue_d, format="%.1f%%"),
-            "% PPtop10% (domain level)": st.column_config.ProgressColumn("% PPtop10% (domain level)", min_value=0.0, max_value=max_t10_d, format="%.1f%%"),
-            "% PPtop1% (domain level)": st.column_config.ProgressColumn("% PPtop1% (domain level)", min_value=0.0, max_value=max_t01_d, format="%.1f%%"),
-            "% internal collaboration": st.column_config.ProgressColumn("% internal collaboration", min_value=0.0, max_value=max_coll, format="%.1f%%"),
+            "Domain name": "Domain",
+            "Pubs": st.column_config.NumberColumn("Publications", format="%.0f"),
+            "% Pubs (uni level)": st.column_config.ProgressColumn("% UL", min_value=0.0, max_value=max_uni, format="%.1f%%"),
+            "Pubs LUE": st.column_config.NumberColumn("Pubs LUE", format="%.0f"),
+            "% Pubs LUE (domain level)": st.column_config.ProgressColumn("% Pubs LUE", min_value=0.0, max_value=max_lue_d, format="%.1f%%"),
+            "% PPtop10% (domain level)": st.column_config.ProgressColumn("% PPtop10%", min_value=0.0, max_value=max_t10_d, format="%.1f%%"),
+            "% PPtop1% (domain level)": st.column_config.ProgressColumn("% PPtop1%", min_value=0.0, max_value=max_t01_d, format="%.1f%%"),
+            "% internal collaboration": st.column_config.ProgressColumn("% internal collaboration", min_value=0.0, max_value=_max(DI["% internal collaboration"]), format="%.1f%%"),
             "% international": st.column_config.ProgressColumn("% international", min_value=0.0, max_value=max_intl, format="%.1f%%"),
-            "% industrial": st.column_config.ProgressColumn("% industrial", min_value=0.0, max_value=max_ind, format="%.1f%%"),
+            # hidden by default (available if you later widen column_order)
             "Avg FWCI (France)": st.column_config.NumberColumn("Avg FWCI (FR)", format="%.2f"),
-            "% Pubs LUE (uni level)": st.column_config.ProgressColumn("% Pubs LUE (UL level)", min_value=0.0, max_value=max_lue_ul, format="%.1f%%"),
-            "% PPtop10% (uni level)": st.column_config.ProgressColumn("% PPtop10% (UL level)", min_value=0.0, max_value=max_t10_ul, format="%.1f%%"),
-            "% PPtop1% (uni level)": st.column_config.ProgressColumn("% PPtop1% (UL level)", min_value=0.0, max_value=max_t01_ul, format="%.1f%%"),
+            "% Pubs LUE (uni level)": st.column_config.ProgressColumn("% Pubs LUE (UL level)", min_value=0.0, max_value=_max(DI["% Pubs LUE (uni level)"]), format="%.1f%%"),
+            "% PPtop10% (uni level)": st.column_config.ProgressColumn("% PPtop10% (UL level)", min_value=0.0, max_value=_max(DI["% PPtop10% (uni level)"]), format="%.1f%%"),
+            "% PPtop1% (uni level)": st.column_config.ProgressColumn("% PPtop1% (UL level)", min_value=0.0, max_value=_max(DI["% PPtop1% (uni level)"]), format="%.1f%%"),
             "See in OpenAlex": st.column_config.LinkColumn("See in OpenAlex"),
         },
     )
 
-    st.markdown("#### FWCI_FR spread by domain (log scale)")
-    wh = (DI[["Domain ID","Domain name","FWCI_FR min","FWCI_FR Q1","FWCI_FR Q2","FWCI_FR Q3","FWCI_FR max"]]
+    # ---------- FWCI spreads (whiskers) ----------
+    st.markdown("#### FWCI_FR spread by domain")
+    use_log_dom = st.toggle("Log scale (domains)", value=False, key="whisk_dom")
+    wh = (DI[["Domain ID","Domain name","Pubs","FWCI_FR min","FWCI_FR Q1","FWCI_FR Q2","FWCI_FR Q3","FWCI_FR max"]]
           .rename(columns={"FWCI_FR Q2":"FWCI_FR median"}))
     wh = wh.dropna(subset=["FWCI_FR min","FWCI_FR Q1","FWCI_FR median","FWCI_FR Q3","FWCI_FR max"]).copy()
     wh["color_key"] = wh["Domain name"]
@@ -317,8 +362,10 @@ with tab_domains:
     })
     st.altair_chart(
         whisker_chart(
-            wh, y_field="Domain", color_field="color_key", title="FWCI_FR (log) — domains",
-            log=True, palette=DOMAIN_PALETTE, fixed_order=[(DOMAIN_NAME_MAP.get(d) or "") for d in DOMAIN_ORDER]
+            wh, y_field="Domain", color_field="color_key", title="FWCI_FR — domains",
+            log=use_log_dom, palette=DOMAIN_PALETTE,
+            fixed_order=[(DOMAIN_NAME_MAP.get(d) or "") for d in DOMAIN_ORDER],
+            count_col="Pubs"
         ),
         use_container_width=True,
     )
@@ -375,17 +422,21 @@ with tab_domains:
          .merge(_lab_whisk("By lab: FWCI_FR max"), on="lab_ror", how="outer", suffixes=("","_max"))
     )
     w = w.rename(columns={"value":"min","value_q1":"q1","value_q2":"median","value_q3":"q3","value_max":"max"})
-    w = w.merge(labs[["lab_ror","lab_label"]], on="lab_ror", how="inner")
+    w = w.merge(labs[["lab_ror","lab_label","count"]], on="lab_ror", how="inner")
 
     with cB:
         if w.empty:
             st.info("No FWCI_FR distribution available for selected labs.")
         else:
+            use_log_lab = st.toggle("Log scale (labs)", value=False, key=f"whisk_labs_{sel_id}")
             st.altair_chart(
                 whisker_chart(
-                    w.assign(Domain=sel_label)[["lab_label","min","q1","median","q3","max","Domain"]],
-                    y_field="lab_label", color_field="Domain", title=f"{sel_label} — FWCI_FR spread for labs (log)",
-                    log=True, palette={sel_label: sel_color}, fixed_order=labs["lab_label"].tolist(), height=max(26*len(labs), 240)
+                    w.assign(Domain=sel_label)[["lab_label","min","q1","median","q3","max","Domain","count"]],
+                    y_field="lab_label", color_field="Domain", title=f"{sel_label} — FWCI_FR spread for labs",
+                    log=use_log_lab, palette={sel_label: sel_color},
+                    fixed_order=labs["lab_label"].tolist(),
+                    height=max(26*len(labs), 240),
+                    count_col="count",
                 ),
                 use_container_width=True,
             )
@@ -395,56 +446,56 @@ with tab_domains:
     # ----- Top partners -----
     st.markdown("#### Top partners")
 
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("**Top 20 French partners**")
-        fr = parse_parallel_lists(
-            name=row.get("Top 20 FR partners (name)"),
-            type=row.get("Top 20 FR partners (type)"),
-            copubs=row.get("Top 20 FR partners (totals copubs in this domain)"),
-            share=row.get("Top 20 FR partners (% of UL total copubs)"),
-        )
-        for col in ["copubs","share"]:
-            if col in fr: fr[col] = pd.to_numeric(fr[col].str.replace(",", "."), errors="coerce")
-        st.dataframe(
-            fr.head(20),
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "name":"Partner",
-                "type":"Type",
-                "copubs": st.column_config.NumberColumn("Co-pubs in domain", format="%.0f"),
-                "share": st.column_config.NumberColumn("% of UL co-pubs with partner", format="%.1f%%"),
-            },
-        )
+    # French partners — one after the other (not side-by-side)
+    st.markdown("**Top 20 French partners (no parent institution)**")
+    fr = parse_parallel_lists(
+        name=row.get("Top 20 FR partners (name)"),
+        type=row.get("Top 20 FR partners (type)"),
+        copubs=row.get("Top 20 FR partners (totals copubs in this domain)"),
+        # important: this is the *correct* column = share of UL–partner co-pubs that fall in this domain
+        share=row.get("Top 20 FR partners (% of UL total copubs)"),
+    )
+    for col in ["copubs","share"]:
+        if col in fr: fr[col] = pd.to_numeric(fr[col].str.replace(",", "."), errors="coerce")
+    # Display with a better header and progress bar
+    st.dataframe(
+        fr.head(20),
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "name":"Partner",
+            "type":"Type",
+            "copubs": st.column_config.NumberColumn("Co-pubs in domain", format="%.0f"),
+            "share": st.column_config.ProgressColumn("Share of UL–partner co-pubs (this domain)", min_value=0.0, max_value=float((fr["share"].max() or 0)*100 if "share" in fr else 100.0), format="%.1f%%"),
+        },
+    )
 
-    with c2:
-        st.markdown("**Top 20 international partners**")
-        intl = parse_parallel_lists(
-            name=row.get("Top 20 int partners (name)"),
-            type=row.get("Top 20 int partners (type)"),
-            country=row.get("Top 20 int partners (country)"),
-            copubs=row.get("Top 20 int partners (totals copubs in this domain)"),
-            share=row.get("Top 20 int partners (% of UL total copubs)"),
-        )
-        for col in ["copubs","share"]:
-            if col in intl: intl[col] = pd.to_numeric(intl[col].str.replace(",", "."), errors="coerce")
-        st.dataframe(
-            intl.head(20),
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "name":"Partner",
-                "type":"Type",
-                "country":"Country",
-                "copubs": st.column_config.NumberColumn("Co-pubs in domain", format="%.0f"),
-                "share": st.column_config.NumberColumn("% of UL co-pubs with partner", format="%.1f%%"),
-            },
-        )
+    st.markdown("**Top 20 international partners**")
+    intl = parse_parallel_lists(
+        name=row.get("Top 20 int partners (name)"),
+        type=row.get("Top 20 int partners (type)"),
+        country=row.get("Top 20 int partners (country)"),
+        copubs=row.get("Top 20 int partners (totals copubs in this domain)"),
+        share=row.get("Top 20 int partners (% of UL total copubs)"),
+    )
+    for col in ["copubs","share"]:
+        if col in intl: intl[col] = pd.to_numeric(intl[col].str.replace(",", "."), errors="coerce")
+    st.dataframe(
+        intl.head(20),
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "name":"Partner",
+            "type":"Type",
+            "country":"Country",
+            "copubs": st.column_config.NumberColumn("Co-pubs in domain", format="%.0f"),
+            "share": st.column_config.ProgressColumn("Share of UL–partner co-pubs (this domain)", min_value=0.0, max_value=float((intl["share"].max() or 0)*100 if "share" in intl else 100.0), format="%.1f%%"),
+        },
+    )
 
     st.divider()
 
-    # ----- Top authors -----
+    # ----- Top authors (DOMAIN) -----
     st.markdown("#### Top 20 authors")
     authors = parse_parallel_lists(
         name=row.get("Top 20 authors (name)"),
@@ -461,21 +512,34 @@ with tab_domains:
         if col in authors: authors[col] = pd.to_numeric(authors[col].str.replace(",", "."), errors="coerce")
     if "lorraine" in authors:
         authors["lorraine"] = authors["lorraine"].str.strip().str.lower().map({"true": True, "false": False}).fillna(authors["lorraine"])
+
+    # Enrich with total UL pubs (from dict_authors if available)
+    if AUTH is not None and not AUTH.empty and "author_id" in AUTH.columns and "total_pubs" in AUTH.columns:
+        auth_map = AUTH.dropna(subset=["author_id"]).drop_duplicates("author_id")[["author_id","total_pubs"]]
+        authors = authors.merge(auth_map, on="author_id", how="left")
+        authors["total_pubs"] = pd.to_numeric(authors["total_pubs"], errors="coerce")
+        authors["share_in_domain"] = (authors["pubs"] / authors["total_pubs"]).replace([np.inf, -np.inf], np.nan)
+    else:
+        authors["total_pubs"] = np.nan
+        authors["share_in_domain"] = np.nan
+
     authors = authors.sort_values(["pubs","fwci"], ascending=[False, False])
 
+    # Visible subset and configs
+    vis_dom_auth = ["name","pubs","total_pubs","share_in_domain","fwci","t10","t01","lorraine","labs"]  # ORCID/ID hidden by default
     st.dataframe(
-        authors.head(20)[["name","pubs","fwci","t10","t01","lorraine","orcid","author_id","labs"]],
+        authors.head(20)[vis_dom_auth],
         width="stretch",
         hide_index=True,
         column_config={
             "name":"Author",
-            "pubs": st.column_config.NumberColumn("Pubs", format="%.0f"),
-            "fwci": st.column_config.NumberColumn("Average FWCI_FR", format="%.2f"),
+            "pubs": st.column_config.NumberColumn("Pubs in this domain", format="%.0f"),
+            "total_pubs": st.column_config.NumberColumn("Total pubs (at UL)", format="%.0f"),
+            "share_in_domain": st.column_config.ProgressColumn("% Pubs in this domain", min_value=0.0, max_value=100.0, format="%.1f%%", help="Share = Pubs in this domain / Total pubs at UL"),
+            "fwci": st.column_config.NumberColumn("Avg. FWCI (France)", format="%.2f"),
             "t10": st.column_config.NumberColumn("PPtop10% Count", format="%.0f"),
             "t01": st.column_config.NumberColumn("PPtop1% Count", format="%.0f"),
             "lorraine":"Is Lorraine",
-            "orcid": st.column_config.TextColumn("ORCID"),
-            "author_id": st.column_config.TextColumn("Author ID"),
             "labs": "Lab(s)",
         },
     )
@@ -535,7 +599,7 @@ with tab_fields:
     field_cols = [
         "Field ID","Field name","Pubs",
         "% Pubs (uni level)","% Pubs LUE (field level)","% PPtop10% (field level)","% PPtop1% (field level)",
-        "% internal collaboration","% international","% industrial",
+        "% internal collaboration","% international","% industrial","Pubs LUE",
         "Avg FWCI (France)","% Pubs LUE (uni level)","% PPtop10% (uni level)","% PPtop1% (uni level)","See in OpenAlex"
     ]
     fld_tbl = FI[field_cols].copy()
@@ -554,6 +618,7 @@ with tab_fields:
             "Field ID": st.column_config.NumberColumn("Field ID", format="%.0f"),
             "Field name": "Field name",
             "Pubs": st.column_config.NumberColumn("Publication counts", format="%.0f"),
+            "Pubs LUE": st.column_config.NumberColumn("Pubs LUE", format="%.0f"),
             "% Pubs (uni level)": st.column_config.ProgressColumn("% Pubs (uni level)", min_value=0.0, max_value=max_uni, format="%.1f%%"),
             "% Pubs LUE (field level)": st.column_config.ProgressColumn("% Pubs LUE (field level)", min_value=0.0, max_value=max_lue_f, format="%.1f%%"),
             "% PPtop10% (field level)": st.column_config.ProgressColumn("% PPtop10% (field level)", min_value=0.0, max_value=max_t10_f, format="%.1f%%"),
@@ -576,7 +641,6 @@ with tab_fields:
     field_labels = FI[["Field ID","Field name","domain_name"]].copy()
     field_labels["Field ID"] = pd.to_numeric(field_labels["Field ID"], errors="coerce")
     field_labels = field_labels.dropna(subset=["Field ID"]).sort_values("Field ID")
-    # include domain for disambiguation
     field_labels["label"] = field_labels.apply(lambda r: f"{int(r['Field ID'])} — {r['Field name']} ({r['domain_name']})", axis=1)
     sel_field_label = st.selectbox("Choose field", options=field_labels["label"].tolist(), index=0, key="pick_field")
     sel_field_id = int(field_labels.loc[field_labels["label"] == sel_field_label, "Field ID"].iloc[0])
@@ -625,17 +689,19 @@ with tab_fields:
           .merge(_lab_whisk_f("By lab: FWCI_FR max"), on="lab_ror", how="outer", suffixes=("","_max"))
     )
     wf = wf.rename(columns={"value":"min","value_q1":"q1","value_q2":"median","value_q3":"q3","value_max":"max"})
-    wf = wf.merge(labs_f[["lab_ror","lab_label"]], on="lab_ror", how="inner")
+    wf = wf.merge(labs_f[["lab_ror","lab_label","count"]], on="lab_ror", how="inner")
 
     with cB:
         if wf.empty:
             st.info("No FWCI_FR distribution available for selected labs.")
         else:
+            use_log_lab_f = st.toggle("Log scale (labs)", value=False, key=f"whisk_labs_field_{sel_field_id}")
             st.altair_chart(
                 whisker_chart(
-                    wf.assign(Domain=sel_field_domain)[["lab_label","min","q1","median","q3","max","Domain"]],
-                    y_field="lab_label", color_field="Domain", title=f"{sel_field_label} — FWCI_FR spread for labs (log)",
-                    log=True, palette={str(sel_field_domain): sel_field_color}, fixed_order=labs_f["lab_label"].tolist(), height=max(26*len(labs_f), 240)
+                    wf.assign(Domain=sel_field_domain)[["lab_label","min","q1","median","q3","max","Domain","count"]],
+                    y_field="lab_label", color_field="Domain", title=f"{sel_field_label} — FWCI_FR spread for labs",
+                    log=use_log_lab_f, palette={str(sel_field_domain): sel_field_color},
+                    fixed_order=labs_f["lab_label"].tolist(), height=max(26*len(labs_f), 240), count_col="count"
                 ),
                 use_container_width=True,
             )
@@ -645,56 +711,53 @@ with tab_fields:
     # ----- Top partners (field) -----
     st.markdown("#### Top partners")
 
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("**Top FR partners (up to 10)**")
-        fr = parse_parallel_lists(
-            name=frow.get("Top 10 FR partners (name)"),
-            type=frow.get("Top 10 FR partners (type)"),
-            copubs=frow.get("Top 10 FR partners (totals copubs in this field)"),
-            share=frow.get("Top 10 FR partners (% of UL total copubs)"),
-        )
-        for col in ["copubs","share"]:
-            if col in fr: fr[col] = pd.to_numeric(fr[col].str.replace(",", "."), errors="coerce")
-        st.dataframe(
-            fr.head(20),
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "name":"Partner",
-                "type":"Type",
-                "copubs": st.column_config.NumberColumn("Co-pubs in field", format="%.0f"),
-                "share": st.column_config.NumberColumn("% of UL co-pubs with partner", format="%.1f%%"),
-            },
-        )
+    st.markdown("**Top French partners (up to 10) (no parent institution)**")
+    fr = parse_parallel_lists(
+        name=frow.get("Top 10 FR partners (name)"),
+        type=frow.get("Top 10 FR partners (type)"),
+        copubs=frow.get("Top 10 FR partners (totals copubs in this field)"),
+        share=frow.get("Top 10 FR partners (% of UL total copubs)"),
+    )
+    for col in ["copubs","share"]:
+        if col in fr: fr[col] = pd.to_numeric(fr[col].str.replace(",", "."), errors="coerce")
+    st.dataframe(
+        fr.head(20),
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "name":"Partner",
+            "type":"Type",
+            "copubs": st.column_config.NumberColumn("Co-pubs in field", format="%.0f"),
+            "share": st.column_config.ProgressColumn("Share of UL–partner co-pubs (this field)", min_value=0.0, max_value=float((fr["share"].max() or 0)*100 if "share" in fr else 100.0), format="%.1f%%"),
+        },
+    )
 
-    with c2:
-        st.markdown("**Top international partners (up to 10)**")
-        intl = parse_parallel_lists(
-            name=frow.get("Top 10 int partners (name)"),
-            type=frow.get("Top 10 int partners (type)"),
-            country=frow.get("Top 10 int partners (country)"),
-            copubs=frow.get("Top 10 int partners (totals copubs in this field)"),
-            share=frow.get("Top 10 int partners (% of UL total copubs)"),
-        )
-        for col in ["copubs","share"]:
-            if col in intl: intl[col] = pd.to_numeric(intl[col].str.replace(",", "."), errors="coerce")
-        st.dataframe(
-            intl.head(20),
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "name":"Partner",
-                "type":"Type",
-                "country":"Country",
-                "copubs": st.column_config.NumberColumn("Co-pubs in field", format="%.0f"),
-                "share": st.column_config.NumberColumn("% of UL co-pubs with partner", format="%.1f%%"),
-            },
-        )
+    st.markdown("**Top international partners (up to 10)**")
+    intl = parse_parallel_lists(
+        name=frow.get("Top 10 int partners (name)"),
+        type=frow.get("Top 10 int partners (type)"),
+        country=frow.get("Top 10 int partners (country)"),
+        copubs=frow.get("Top 10 int partners (totals copubs in this field)"),
+        share=frow.get("Top 10 int partners (% of UL total copubs)"),
+    )
+    for col in ["copubs","share"]:
+        if col in intl: intl[col] = pd.to_numeric(intl[col].str.replace(",", "."), errors="coerce")
+    st.dataframe(
+        intl.head(20),
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "name":"Partner",
+            "type":"Type",
+            "country":"Country",
+            "copubs": st.column_config.NumberColumn("Co-pubs in field", format="%.0f"),
+            "share": st.column_config.ProgressColumn("Share of UL–partner co-pubs (this field)", min_value=0.0, max_value=float((intl["share"].max() or 0)*100 if "share" in intl else 100.0), format="%.1f%%"),
+        },
+    )
 
     st.divider()
 
-    # ----- Top authors (field) -----
+    # ----- Top authors (FIELD) -----
     st.markdown("#### Top authors")
     authors = parse_parallel_lists(
         name=frow.get("Top 10 authors (name)"),
@@ -711,21 +774,32 @@ with tab_fields:
         if col in authors: authors[col] = pd.to_numeric(authors[col].str.replace(",", "."), errors="coerce")
     if "lorraine" in authors:
         authors["lorraine"] = authors["lorraine"].str.strip().str.lower().map({"true": True, "false": False}).fillna(authors["lorraine"])
+
+    if AUTH is not None and not AUTH.empty and "author_id" in AUTH.columns and "total_pubs" in AUTH.columns:
+        auth_map = AUTH.dropna(subset=["author_id"]).drop_duplicates("author_id")[["author_id","total_pubs"]]
+        authors = authors.merge(auth_map, on="author_id", how="left")
+        authors["total_pubs"] = pd.to_numeric(authors["total_pubs"], errors="coerce")
+        authors["share_in_field"] = (authors["pubs"] / authors["total_pubs"]).replace([np.inf, -np.inf], np.nan)
+    else:
+        authors["total_pubs"] = np.nan
+        authors["share_in_field"] = np.nan
+
     authors = authors.sort_values(["pubs","fwci"], ascending=[False, False])
 
+    vis_field_auth = ["name","pubs","total_pubs","share_in_field","fwci","t10","t01","lorraine","labs"]
     st.dataframe(
-        authors.head(20)[["name","pubs","fwci","t10","t01","lorraine","orcid","author_id","labs"]],
+        authors.head(20)[vis_field_auth],
         width="stretch",
         hide_index=True,
         column_config={
             "name":"Author",
-            "pubs": st.column_config.NumberColumn("Pubs", format="%.0f"),
-            "fwci": st.column_config.NumberColumn("Average FWCI_FR", format="%.2f"),
+            "pubs": st.column_config.NumberColumn("Pubs in this field", format="%.0f"),
+            "total_pubs": st.column_config.NumberColumn("Total pubs (at UL)", format="%.0f"),
+            "share_in_field": st.column_config.ProgressColumn("% Pubs in this field", min_value=0.0, max_value=100.0, format="%.1f%%"),
+            "fwci": st.column_config.NumberColumn("Avg. FWCI (France)", format="%.2f"),
             "t10": st.column_config.NumberColumn("PPtop10% Count", format="%.0f"),
             "t01": st.column_config.NumberColumn("PPtop1% Count", format="%.0f"),
             "lorraine":"Is Lorraine",
-            "orcid": st.column_config.TextColumn("ORCID"),
-            "author_id": st.column_config.TextColumn("Author ID"),
             "labs": "Lab(s)",
         },
     )
