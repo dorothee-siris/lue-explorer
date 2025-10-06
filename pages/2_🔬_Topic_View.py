@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 import pandas as pd
 import streamlit as st
+import altair as alt
 
 from lib.io import load_all_core
 from lib.taxonomy import build_taxonomy_lookups
@@ -12,9 +13,7 @@ from lib.tables import show_table, progressify
 from lib.exports import download_csv_button
 from lib.transforms import parse_id_count_series
 
-
 st.set_page_config(page_title="🔬 Topic View", layout="wide")
-
 
 # ---------------------------- small helpers ----------------------------
 def _pct_0_100(x) -> float:
@@ -23,12 +22,10 @@ def _pct_0_100(x) -> float:
     except Exception:
         return float("nan")
 
-
 def _explode(cell: str, sep="|"):
     if pd.isna(cell) or cell is None:
         return []
     return [c.strip() for c in str(cell).replace(";", sep).split(sep) if c.strip()]
-
 
 def _parse_pairs_to(df_or_cell, id_type=str, val_type=float) -> pd.DataFrame:
     """Accept a single cell or a Series of 'id (value) | id (value)' -> DataFrame[id,value]."""
@@ -38,13 +35,11 @@ def _parse_pairs_to(df_or_cell, id_type=str, val_type=float) -> pd.DataFrame:
         return pd.DataFrame(columns=["id", "value"])
     return out.rename(columns={"count": "value"})[["id", "value"]].copy()
 
-
 def _field_domain(field_name: str, lookups: dict) -> str:
     for d, fields in lookups["fields_by_domain"].items():
         if field_name in fields:
             return d
     return "Other"
-
 
 def _join_lab_names(labs_df: pd.DataFrame, units_df: pd.DataFrame) -> pd.DataFrame:
     name_map = units_df.set_index("ROR")["Unit Name"].to_dict()
@@ -52,11 +47,16 @@ def _join_lab_names(labs_df: pd.DataFrame, units_df: pd.DataFrame) -> pd.DataFra
     out["Lab"] = out["ROR"].map(name_map).fillna(out["ROR"])
     return out
 
-
 def _pad_to(lst, n, fill=None):
     lst = list(lst or [])
     return (lst + [fill] * max(0, n - len(lst)))[:n]
 
+def _first_token(s: str) -> str:
+    if not s or pd.isna(s):
+        return ""
+    # split on both '|' and ';'
+    parts = str(s).replace(";", "|").split("|")
+    return parts[0].strip()
 
 # ---------------------------- load core ----------------------------
 core = load_all_core()  # pubs, authors, fields, domains, partners, units, topics
@@ -71,9 +71,8 @@ lookups = build_taxonomy_lookups()  # domain_order, fields_by_domain, subfields_
 st.title("🔬 Topic View")
 st.caption("Domain palette drives colors. Labels always visible. % charts show counts in the left gutter. FWCI whiskers use min/Q1/median/Q3/max.")
 
-
 # ============================================================================
-# 1) DOMAIN OVERVIEW TABLE  (renames + visibility rules)
+# 1) DOMAIN OVERVIEW TABLE
 # ============================================================================
 st.subheader("Domain overview")
 
@@ -87,7 +86,7 @@ dom_df = pd.DataFrame({
     "% PPtop1%": domains["% PPtop1% (domain level)"].apply(_pct_0_100),
     "% internal collaboration": domains["% internal collaboration"].apply(_pct_0_100),
     "% international": domains["% international"].apply(_pct_0_100),
-    # hidden by default (available behind the toggle)
+    # hidden by default
     "Avg. FWCI (France)": domains.get("Avg FWCI (France)", pd.Series([math.nan] * len(domains))),
     "% Pubs LUE (uni level)": domains["% Pubs LUE (uni level)"].apply(_pct_0_100),
     "% PPtop10% (uni level)": domains["% PPtop10% (uni level)"].apply(_pct_0_100),
@@ -102,7 +101,6 @@ order_clean = [d.strip() for d in lookups.get("domain_order", []) if d and d.str
 if order_clean:
     dom_df = dom_df.set_index("__key").reindex(order_clean).reset_index(drop=True)
 
-# This list drives both the table and the selectbox below
 domain_options = dom_df["Domain"].tolist()
 
 visible_cols = ["Domain", "Publications", "% UL", "Pubs LUE", "% Pubs LUE",
@@ -119,14 +117,13 @@ cfg = progressify(dom_df, [
 show_table(dom_df[advanced_cols if show_adv else visible_cols], column_config=cfg)
 download_csv_button(dom_df, "Download domain overview (CSV)", "domains_overview.csv")
 
-
 # ============================================================================
-# 2) DOMAIN FWCI WHISKERS (no log scale)
+# 2) DOMAIN FWCI WHISKERS
 # ============================================================================
 st.subheader("FWCI (France) distribution by domain")
 qcols = {"min": "FWCI_FR min", "q1": "FWCI_FR Q1", "q2": "FWCI_FR Q2", "q3": "FWCI_FR Q3", "max": "FWCI_FR max"}
 
-# Pass only the columns the chart needs (avoid colon headers in tooltips)
+# Pass only needed columns to avoid Altair colon-parsing from other headers
 _whisker_df = domains[["Domain name", qcols["min"], qcols["q1"], qcols["q2"], qcols["q3"], qcols["max"]]].copy()
 
 st.altair_chart(
@@ -136,11 +133,10 @@ st.altair_chart(
         qcols=qcols,
         domain_col="Domain name",
         title="FWCI (France) — min / Q1 / median / Q3 / max",
-        order=domain_options,  # same order used in the table
+        order=domain_options,
     ),
     use_container_width=True,
 )
-
 
 # ============================================================================
 # 3) DRILLDOWN BY DOMAIN
@@ -149,9 +145,8 @@ st.subheader("Drill down by domain")
 sel_domain = st.selectbox("Pick a domain", options=domain_options, index=0)
 drow = domains.loc[domains["Domain name"] == sel_domain].iloc[0]
 
-# --- Labs contribution (left) + FWCI whiskers for the same labs (right)
+# --- Labs contribution (bars) + FWCI whiskers (same labs) as one concatenated chart
 st.markdown("##### Labs contribution and impact")
-c1, c2 = st.columns(2)
 
 labs_count = _parse_pairs_to(drow["By lab: count"], id_type=str, val_type=int).rename(columns={"id": "ROR", "value": "count"})
 labs_share = _parse_pairs_to(drow["By lab: % of domain pubs"], id_type=str, val_type=float).rename(columns={"id": "ROR", "value": "share"})
@@ -163,53 +158,51 @@ labs["domain_name"] = sel_domain
 labs = labs.sort_values("share", ascending=False).reset_index(drop=True)
 lab_order = labs["Lab"].tolist()
 
-with c1:
-    st.altair_chart(
-        plot_bar_with_counts(
-            labs.rename(columns={"Lab": "Label"}),
-            label_col="Label",
-            value_col="share_pct",
-            count_col="count",
-            domain_col="domain_name",
-            title="% of domain publications",
-            order=lab_order,
-        ),
-        use_container_width=True,
-    )
+# unified row height for both subcharts (keeps labels aligned)
+n = max(len(lab_order), 1)
+row_h = 28
+height = max(220, n * row_h)
 
-# Lab FWCI whiskers (same lab order)
+left_chart = plot_bar_with_counts(
+    labs.rename(columns={"Lab": "Label"}),
+    label_col="Label",
+    value_col="share_pct",
+    count_col="count",
+    domain_col="domain_name",
+    title="% of domain publications",
+    order=lab_order,
+).properties(height=height)
+
 def _lab_q(col):
     return _parse_pairs_to(drow[col], id_type=str, val_type=float).rename(columns={"id": "ROR"}).set_index("ROR")["value"]
 
-if all(k in drow for k in ["By lab: FWCI_FR p5", "By lab: FWCI_FR Q1", "By lab: FWCI_FR Q2", "By lab: FWCI_FR Q3", "By lab: FWCI_FR p95"]):
+right_chart = None
+if all(k in drow for k in ["By lab: FWCI_FR min", "By lab: FWCI_FR Q1", "By lab: FWCI_FR Q2", "By lab: FWCI_FR Q3", "By lab: FWCI_FR max"]):
     qdf = pd.DataFrame({
         "ROR": labs["ROR"].tolist(),
-        "min": _lab_q("By lab: FWCI_FR p5").reindex(labs["ROR"]).values,
+        "min": _lab_q("By lab: FWCI_FR min").reindex(labs["ROR"]).values,
         "q1":  _lab_q("By lab: FWCI_FR Q1").reindex(labs["ROR"]).values,
         "q2":  _lab_q("By lab: FWCI_FR Q2").reindex(labs["ROR"]).values,
         "q3":  _lab_q("By lab: FWCI_FR Q3").reindex(labs["ROR"]).values,
-        "max": _lab_q("By lab: FWCI_FR p95").reindex(labs["ROR"]).values,
+        "max": _lab_q("By lab: FWCI_FR max").reindex(labs["ROR"]).values,
     })
     qdf = _join_lab_names(qdf, units)
     qdf["domain_name"] = sel_domain
-    with c2:
-        st.altair_chart(
-            plot_whisker(
-                qdf.rename(columns={"Lab": "Label"}),
-                label_col="Label",
-                qcols={"min": "min", "q1": "q1", "q2": "q2", "q3": "q3", "max": "max"},
-                domain_col="domain_name",
-                title="FWCI (France) by lab",
-                order=lab_order,
-            ),
-            use_container_width=True,
-        )
+    right_chart = plot_whisker(
+        qdf.rename(columns={"Lab": "Label"}),
+        label_col="Label",
+        qcols={"min": "min", "q1": "q1", "q2": "q2", "q3": "q3", "max": "max"},
+        domain_col="domain_name",
+        title="FWCI (France) by lab",
+        order=lab_order,
+    ).properties(height=height).configure_axisY(labels=False, ticks=False, domain=False)
+
+if right_chart is not None:
+    st.altair_chart((left_chart | right_chart).resolve_scale(y='shared'), use_container_width=True)
 else:
-    with c2:
-        st.info("FWCI whiskers by lab unavailable for this domain in the source file.")
+    st.altair_chart(left_chart, use_container_width=True)
 
-
-# --- Top partners (FR first, then International — not side-by-side)
+# --- Top partners (FR first, then International — stacked vertically)
 st.markdown("##### Top partners")
 
 # Top 20 French partners (no parent institution)
@@ -217,7 +210,6 @@ st.markdown("**Top 20 French partners (no parent institution)**")
 fr_names = _explode(drow["Top 20 FR partners (name)"])
 fr_types = _explode(drow["Top 20 FR partners (type)"])
 fr_copubs = _pad_to([int(x) if x else 0 for x in _explode(drow["Top 20 FR partners (totals copubs in this domain)"])], len(fr_names), 0)
-# Correct % column to use: “% of UL total copubs” for this partner (render as progress)
 fr_pct_ul = _pad_to([float(x) * 100.0 for x in _explode(drow["Top 20 FR partners (% of UL total copubs)"])], len(fr_names), 0.0)
 
 fr_df = pd.DataFrame({
@@ -245,8 +237,7 @@ int_df = pd.DataFrame({
 })
 show_table(int_df, column_config=progressify(int_df, ["Share of UL–partner copubs (this domain)"]))
 
-
-# --- Top 20 authors (with added “Total pubs (at UL)” and derived %; ORCID/ID hidden by default)
+# --- Top 20 authors (robust: length padding + dict mapping for totals)
 st.markdown("##### Top 20 authors")
 
 auth_names = _explode(drow["Top 20 authors (name)"])
@@ -260,8 +251,12 @@ else:
     auth_top10       = _pad_to([int(x) if x else 0 for x in _explode(drow["Top 20 authors (PPtop10% Count)"])], n, 0)
     auth_top1        = _pad_to([int(x) if x else 0 for x in _explode(drow["Top 20 authors (PPtop1% Count)"])], n, 0)
     auth_is_lorraine = _pad_to([str(x).strip().lower() == "true" for x in _explode(drow["Top 20 authors (Is Lorraine)"])], n, False)
-    auth_orcid       = _pad_to(_explode(drow.get("Top 20 authors (Orcid)", "")), n, "")
-    auth_ids         = _pad_to(_explode(drow.get("Top 20 authors (ID)", "")), n, "")
+    auth_orcid_raw   = _pad_to(_explode(drow.get("Top 20 authors (Orcid)", "")), n, "")
+    auth_ids_raw     = _pad_to(_explode(drow.get("Top 20 authors (ID)", "")), n, "")
+
+    # First token of ORCID/ID per author row (to make mapping deterministic)
+    auth_orcid = [_first_token(x) for x in auth_orcid_raw]
+    auth_ids   = [_first_token(x) for x in auth_ids_raw]
 
     top_df = pd.DataFrame({
         "Author": auth_names,
@@ -274,43 +269,27 @@ else:
         "Author ID": auth_ids,
     })
 
-    # Bring “Total pubs (at UL)” from authors table via ORCID first, then Author ID
-    authors_long = []
-    if "ORCID" in authors.columns:
+    # Build lookups (dicts) from authors parquet
+    id_to_total = {}
+    if "Author ID" in authors.columns and "Publications (unique)" in authors.columns:
         for _, r in authors.iterrows():
-            for o in _explode(r["ORCID"], sep="|"):
-                authors_long.append({
-                    "Key": o,
-                    "Kind": "ORCID",
-                    "Total pubs (at UL)": r.get("Publications (unique)", pd.NA)
-                })
-    if "Author ID" in authors.columns:
+            for aid in _explode(r["Author ID"], sep="|"):
+                if aid and aid not in id_to_total:
+                    id_to_total[aid] = r["Publications (unique)"]
+
+    orcid_to_total = {}
+    if "ORCID" in authors.columns and "Publications (unique)" in authors.columns:
         for _, r in authors.iterrows():
-            for a in _explode(r["Author ID"], sep="|"):
-                authors_long.append({
-                    "Key": a,
-                    "Kind": "Author ID",
-                    "Total pubs (at UL)": r.get("Publications (unique)", pd.NA)
-                })
-    authors_long = pd.DataFrame(authors_long)
+            for oc in _explode(r["ORCID"], sep="|"):
+                if oc and oc not in orcid_to_total:
+                    orcid_to_total[oc] = r["Publications (unique)"]
 
     enriched = top_df.copy()
-    enriched["Total pubs (at UL)"] = pd.NA
-    if not authors_long.empty:
-        # ORCID match
-        m_orcid = enriched.merge(
-            authors_long[authors_long["Kind"] == "ORCID"][["Key", "Total pubs (at UL)"]],
-            left_on="ORCID", right_on="Key", how="left"
-        ).drop(columns=["Key"])
-        enriched["Total pubs (at UL)"] = m_orcid["Total pubs (at UL)"]
-        # Backfill by Author ID
-        miss = enriched["Total pubs (at UL)"].isna()
-        if miss.any():
-            m_id = enriched[miss].merge(
-                authors_long[authors_long["Kind"] == "Author ID"][["Key", "Total pubs (at UL)"]],
-                left_on="Author ID", right_on="Key", how="left"
-            ).drop(columns=["Key"])
-            enriched.loc[miss, "Total pubs (at UL)"] = m_id["Total pubs (at UL)"].values
+    # Prefer Author ID, then ORCID
+    enriched["Total pubs (at UL)"] = enriched["Author ID"].map(id_to_total)
+    missing = enriched["Total pubs (at UL)"].isna()
+    if missing.any():
+        enriched.loc[missing, "Total pubs (at UL)"] = enriched.loc[missing, "ORCID"].map(orcid_to_total)
 
     enriched["Total pubs (at UL)"] = pd.to_numeric(enriched["Total pubs (at UL)"], errors="coerce")
     denom = enriched["Total pubs (at UL)"].replace(0, pd.NA)
@@ -323,7 +302,6 @@ else:
     show_ids = st.toggle("Show ORCID and Author ID", False, key="authors_ids_toggle")
     show_table(enriched[auth_all if show_ids else auth_basic],
                column_config=progressify(enriched, ["% Pubs in this domain"]))
-
 
 # --- Field distribution inside the selected domain
 st.markdown("##### Thematic shape — fields within this domain")
@@ -352,9 +330,8 @@ st.altair_chart(
     use_container_width=True,
 )
 
-
 # ============================================================================
-# 4) SUBFIELD SHAPE COMPARISON (field-level) — UL vs another institution
+# 4) SUBFIELD SHAPE COMPARISON — UL vs another institution
 # ============================================================================
 st.subheader("Compare subfield shape within a field")
 
@@ -374,7 +351,6 @@ with cR:
 
 mode = st.radio("Scale", ["Relative to selected field", "Absolute (institution-level)"], index=0, horizontal=True)
 
-
 def ul_subfields_for_field(field_name: str, as_relative: bool) -> pd.DataFrame:
     row = fields.loc[fields["Field name"] == field_name]
     if row.empty:
@@ -391,7 +367,6 @@ def ul_subfields_for_field(field_name: str, as_relative: bool) -> pd.DataFrame:
         total_ul = int(domains["Pubs"].sum())
         df["pct"] = df["count"].astype(float) / max(total_ul, 1) * 100.0
     return df[["Subfield", "count", "pct"]]
-
 
 def partner_subfields_for_field(partner_name: str, field_name: str, as_relative: bool) -> pd.DataFrame:
     prow = partners.loc[partners["Institution name"] == partner_name]
@@ -410,7 +385,6 @@ def partner_subfields_for_field(partner_name: str, field_name: str, as_relative:
     sub_counts["Subfield"] = sub_counts["subfield_id"].apply(lambda x: sid2name.get(int(str(x)), str(x)))
     return sub_counts[["Subfield", "count", "pct"]]
 
-
 def _subfield_chart(df: pd.DataFrame, field_name: str):
     dname = _field_domain(field_name, lookups)
     df = df.copy()
@@ -426,7 +400,6 @@ def _subfield_chart(df: pd.DataFrame, field_name: str):
         title=f"{field_name} — subfield distribution (%)",
         order=sf_canon,
     )
-
 
 left_df = (
     ul_subfields_for_field(sel_field, as_relative=(mode == "Relative to selected field"))
