@@ -1,49 +1,24 @@
+# constants.py
 from __future__ import annotations
+from typing import Final, Dict, List
 
 
-# Project years (inclusive)
-YEAR_START = 2019
-YEAR_END = 2023
+DATA_DIR: Final = "data" # relative to Streamlit working dir
+YEAR_RANGE: Final = list(range(2019, 2024)) # [2019..2023]
 
 
-FIELDS_TO_DOMAIN = {
-# 1) PHYSICAL SCIENCES
-"Chemical Engineering": "Physical Sciences",
-"Chemistry": "Physical Sciences",
-"Computer Science": "Physical Sciences",
-"Earth and Planetary Sciences": "Physical Sciences",
-"Energy": "Physical Sciences",
-"Engineering": "Physical Sciences",
-"Materials Science": "Physical Sciences",
-"Mathematics": "Physical Sciences",
-"Physics and Astronomy": "Physical Sciences",
-# 2) LIFE SCIENCES
-"Agricultural and Biological Sciences": "Life Sciences",
-"Biochemistry, Genetics and Molecular Biology": "Life Sciences",
-"Environmental Science": "Life Sciences",
-"Immunology and Microbiology": "Life Sciences",
-# 3) HEALTH SCIENCES
-"Dentistry": "Health Sciences",
-"Health Professions": "Health Sciences",
-"Medicine": "Health Sciences",
-"Neuroscience": "Health Sciences",
-"Nursing": "Health Sciences",
-"Pharmacology, Toxicology and Pharmaceutics": "Health Sciences",
-"Veterinary": "Health Sciences",
-# 4) SOCIAL SCIENCES
-"Arts and Humanities": "Social Sciences",
-"Business, Management and Accounting": "Social Sciences",
-"Decision Sciences": "Social Sciences",
-"Economics, Econometrics and Finance": "Social Sciences",
-"Psychology": "Social Sciences",
-"Social Sciences": "Social Sciences",
-}
+# Canonical domain ordering
+DOMAIN_ORDER: Final[List[str]] = [
+"Health Sciences",
+"Life Sciences",
+"Physical Sciences",
+"Social Sciences",
+"Other",
+]
 
 
-DOMAIN_NAMES = ["Health Sciences", "Life Sciences", "Physical Sciences", "Social Sciences", "Other"]
-
-
-DOMAIN_COLORS = {
+# Domain colors (cascade to children)
+DOMAIN_COLORS: Final[Dict[str, str]] = {
 "Health Sciences": "#F85C32",
 "Life Sciences": "#0CA750",
 "Physical Sciences": "#8190FF",
@@ -52,7 +27,33 @@ DOMAIN_COLORS = {
 }
 
 
-# Links
-ROR_URL = "https://ror.org/{ror}"
-OPENALEX_INSTITUTION_QUERY = "https://api.openalex.org/institutions?filter=ror:{ror}" # API query as a stable fallback
-OPENALEX_WORKS_FOR_ROR = "https://api.openalex.org/works?filter=institutions.ror:{ror}" # direct works listing
+# Column keys (centralized to avoid typos)
+COL = type("COL", (), {
+# Core tables
+"PUBS": "pubs_final.parquet",
+"AUTHORS": "ul_authors_indicators.parquet",
+"FIELDS": "ul_fields_indicators.parquet",
+"DOMAINS": "ul_domains_indicators.parquet",
+"PARTNERS": "ul_partners_indicators.parquet",
+"UNITS": "ul_units_indicators.parquet",
+"TOPICS": "all_topics.parquet",
+
+
+# Common column names used across pages (abbreviated, map in transforms if needed)
+"FIELD_ID": "Field ID",
+"FIELD_NAME": "Field name",
+"DOMAIN_ID": "Domain ID",
+"DOMAIN_NAME": "Domain name",
+"SUBFIELD_ID": "subfield_id",
+"SUBFIELD_NAME": "subfield_name",
+"YEAR": "Publication Year",
+"TYPE": "Publication Type",
+"FWCI_FR": "Avg FWCI (France)", # or dataset-specific key
+})
+
+
+# UI defaults
+MIN_PARTNER_COPUBS: Final = 50
+TOP_N_PARTNERS: Final = 20
+TOP_N_AUTHORS: Final = 20
+COUNT_LABEL_GUTTER_PX: Final = 80 # left gutter for count labels in bar charts

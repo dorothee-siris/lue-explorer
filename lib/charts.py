@@ -1,183 +1,164 @@
+# lib/charts.py
 from __future__ import annotations
-import pandas as pd
+
+from math import ceil
+from typing import Dict, List, Optional
+
 import altair as alt
+import pandas as pd
 
-from lib.constants import DOMAIN_COLORS
-from lib.transforms import map_field_to_domain, darken, field_order
+from .taxonomy import get_domain_color
 
-# Streamlit sometimes limits rows in Altair; disable that.
-alt.data_transformers.disable_max_rows()
-
-
-def _color_for_row(domain: str, in_lue: bool) -> str:
-    base = DOMAIN_COLORS.get(domain, DOMAIN_COLORS["Other"])
-    return darken(base, 0.7 if in_lue else 1.0)
+# Streamlit renders Altair with container_width, so width/height are hints.
+_LEFT_GUTTER_PX = 80  # space for count labels (left of bars)
+_BAR_WIDTH_PX = 720   # default bar area width
 
 
-def field_mix_bars(
-    df: pd.DataFrame,
-    value_col: str = "count",
-    percent: bool = False,
-    height_per_field: int = 18,
-    xmin: float | None = 0.0,
-    xmax: float | None = None,
-    enforce_order_from: list[str] | None = None,   # pass FULL field catalogue here
-    show_y_labels: bool = True,
-    width: int | None = None,                      # <-- accept width
-):
-    """
-    Horizontal stacked bars of field distribution by domain.
-    Segments: "ISITE" (darker) and "Not ISITE".
-    Ensures EVERY field in `enforce_order_from` appears (zeros if absent).
-    """
-    if df is None or df.empty:
-        # Build an empty chart with the right encoding so Streamlit won't crash.
-        return alt.Chart(pd.DataFrame({"field": [], "value": []})).mark_bar()
+def _dynamic_height(n_items: int) -> int:
+    """Compute chart pixel height so all labels are always visible."""
+    return int(ceil(48 * max(n_items, 1) + 80))
 
-    # ---- ensure full field list + zeros for missing fields ----
-    fields_full = enforce_order_from or sorted(df["field"].dropna().unique().tolist())
-    base = pd.DataFrame({"field": fields_full})
-    base["domain"] = base["field"].map(map_field_to_domain)
 
-    d = df.copy()
-    d["in_lue_count"] = pd.to_numeric(d.get("in_lue_count", 0), errors="coerce").fillna(0).astype(int)
-    d[value_col] = pd.to_numeric(d.get(value_col, 0), errors="coerce").fillna(0)
-
-    d = base.merge(d[["field", value_col, "in_lue_count"]], on="field", how="left")
-    d[[value_col, "in_lue_count"]] = d[[value_col, "in_lue_count"]].fillna(0)
-
-    # friendly segment names
-    d["Not ISITE"] = d[value_col] - d["in_lue_count"]
-    d["ISITE"] = d["in_lue_count"]
-    d = d.melt(
-        id_vars=["field", "domain"],
-        value_vars=["Not ISITE", "ISITE"],
-        var_name="segment",
-        value_name="value",
-    )
-    d["is_lue"] = d["segment"].eq("ISITE")
-
-    if percent:
-        totals = d.groupby("field")["value"].transform(lambda s: s.sum() if s.sum() else 1)
-        d["value"] = d["value"] / totals
-
-    d["color"] = d.apply(lambda r: _color_for_row(r["domain"], bool(r["is_lue"])), axis=1)
-
-    # fixed order (domain buckets -> A→Z)
-    order = field_order(fields_full)
-    chart_height = max(220, int(len(order) * height_per_field))
-
-    # X axis & scale
-    x_axis = alt.Axis(format="%", tickCount=5) if percent else alt.Axis()
-    if percent:
-        x_scale = alt.Scale(domain=[0, 1])
+def _apply_domain_colors(df: pd.DataFrame, domain_col: Optional[str]) -> pd.DataFrame:
+    out = df.copy()
+    if domain_col and domain_col in out.columns:
+        out["__color__"] = out[domain_col].map(get_domain_color)
     else:
-        lo = 0 if xmin is None else xmin
-        x_scale = alt.Scale(domain=[lo, xmax] if (xmax is not None and xmax > 0) else None)
+        out["__color__"] = "#7f7f7f"
+    return out
 
-    # Force the full y-domain so labels always show (even when all zeros)
-    y_axis = alt.Axis(labels=show_y_labels, ticks=False, labelFontSize=11, labelPadding=2, labelLimit=9999)
-    y_scale = alt.Scale(domain=order)
 
-    # Slimmer margins to reduce wasted space; fixed left padding keeps the plotting
-    # width consistent between the two side-by-side charts.
-    padding = {"left": 80, "right": 6, "top": 2, "bottom": 4}
+def _order_categorical(df: pd.DataFrame, label_col: str, order: Optional[List[str]]) -> pd.DataFrame:
+    if not order:
+        return df
+    out = df.copy()
+    # Keep only items that exist; preserve user order
+    ordered = [x for x in order if x in out[label_col].astype(str).tolist()]
+    out[label_col] = pd.Categorical(out[label_col], categories=ordered, ordered=True)
+    out = out.sort_values(label_col)
+    return out
 
-    tooltip = [
-        alt.Tooltip("field:N", title="Field"),
-        alt.Tooltip("domain:N", title="Domain"),
-        alt.Tooltip("segment:N", title="Segment"),
-        alt.Tooltip("value:Q", title=("Share" if percent else "Count"), format=(".0%" if percent else ",")),
-    ]
 
-    chart = (
-        alt.Chart(d)
+def plot_bar_with_counts(
+    df: pd.DataFrame,
+    label_col: str,
+    value_col: str,
+    count_col: str,
+    domain_col: Optional[str],
+    title: str,
+    order: Optional[List[str]] = None,
+) -> alt.Chart:
+    """
+    Horizontal bar chart with a left text gutter for counts.
+    - label_col: y-axis labels (all shown)
+    - value_col: numeric value (e.g., %)
+    - count_col: integer counts shown in left gutter
+    - domain_col: used to color bars with domain palette (via get_domain_color)
+    - order: explicit label order (kept even for labels with value 0)
+    """
+    base = df.copy()
+    # Normalize columns to strings/numerics
+    base[label_col] = base[label_col].astype(str)
+    base[value_col] = pd.to_numeric(base[value_col], errors="coerce").fillna(0.0)
+    base[count_col] = pd.to_numeric(base[count_col], errors="coerce").fillna(0)
+
+    base = _order_categorical(base, label_col, order)
+    base = _apply_domain_colors(base, domain_col)
+    height = _dynamic_height(len(base))
+
+    # Left gutter counts (right-aligned)
+    txt = (
+        alt.Chart(base, height=height, width=_LEFT_GUTTER_PX)
+        .mark_text(align="right", dx=-6)
+        .encode(
+            y=alt.Y(f"{label_col}:N", sort=None, title=""),
+            text=alt.Text(f"{count_col}:Q", format=",.0f"),
+            color=alt.value("#444"),
+            tooltip=[count_col],
+        )
+    )
+
+    # Bars
+    bars = (
+        alt.Chart(base, height=height, width=_BAR_WIDTH_PX)
         .mark_bar()
         .encode(
-            y=alt.Y("field:N", scale=y_scale, title=None, axis=y_axis),
-            x=alt.X("value:Q", title=("Share of works" if percent else "Works"), axis=x_axis, scale=x_scale),
-            color=alt.Color("color:N", legend=None, scale=None),
-            tooltip=tooltip,
+            y=alt.Y(f"{label_col}:N", sort=None, title=""),
+            x=alt.X(f"{value_col}:Q", title=title),
+            color=alt.Color("__color__:N", scale=None, legend=None),
+            tooltip=list(base.columns),
         )
-        .properties(height=chart_height, padding=padding)
     )
-    if width is not None:
-        chart = chart.properties(width=width)
 
-    return chart
+    return txt | bars  # horizontal concat
 
-def simple_field_bars(
+
+def plot_whisker(
     df: pd.DataFrame,
-    value_col: str = "count",
-    percent: bool = False,
-    enforce_order_from: list[str] | None = None,
-    show_counts: bool = True,
-    width: int | None = 560,
-    height_per_field: int = 18,
-):
+    label_col: str,
+    qcols: Dict[str, str],
+    domain_col: Optional[str],
+    title: str,
+    log_x: bool = True,
+    order: Optional[List[str]] = None,
+) -> alt.Chart:
     """
-    One-segment horizontal bars by field (colored by domain), optional % mode.
-    Prints the integer count next to the y-label (volume only).
-    Ensures every field in `enforce_order_from` is shown (zeros if missing).
+    Whisker plot with min/Q1/median/Q3/max.
+    qcols keys: {'min','q1','q2','q3','max'} -> column names
+    If log_x=True, values <= 0 are clipped to a small epsilon for rendering.
     """
-    if df is None:
-        df = pd.DataFrame(columns=["field", value_col])
+    base = df.copy()
+    base[label_col] = base[label_col].astype(str)
+    for key in ("min", "q1", "q2", "q3", "max"):
+        col = qcols[key]
+        base[col] = pd.to_numeric(base[col], errors="coerce")
+    base = _order_categorical(base, label_col, order)
+    base = _apply_domain_colors(base, domain_col)
+    height = _dynamic_height(len(base))
 
-    d = df.copy()
-    d["field"] = d.get("field")
-    d[value_col] = pd.to_numeric(d.get(value_col, 0), errors="coerce").fillna(0)
+    # Log safety: clip non-positive values to a small epsilon
+    if log_x:
+        eps = 1e-3
+        for key in ("min", "q1", "q2", "q3", "max"):
+            col = qcols[key]
+            base[col] = base[col].where(base[col] > eps, eps)
 
-    # Full field list and domain mapping
-    fields_full = enforce_order_from or sorted(d["field"].dropna().unique().tolist())
-    base = pd.DataFrame({"field": fields_full})
-    base["domain"] = base["field"].map(map_field_to_domain)
+    xscale = alt.Scale(type="log") if log_x else alt.Scale()
 
-    # Ensure missing fields exist with zeros
-    d = base.merge(d[["field", value_col]], on="field", how="left")
-    d[value_col] = d[value_col].fillna(0)
-
-    # compute value / percent
-    if percent:
-        total = float(d[value_col].sum() or 1.0)
-        d["value"] = d[value_col] / total
-    else:
-        d["value"] = d[value_col]
-
-    # fixed order + size
-    order = field_order(fields_full)
-    h = max(220, int(len(order) * height_per_field))
-
-    # axes
-    x_axis = alt.Axis(format="%", tickCount=5) if percent else alt.Axis()
-    x_scale = alt.Scale(domain=[0, 1]) if percent else alt.Undefined
-    y_axis = alt.Axis(labelLimit=9999, labelPadding=2, labelFontSize=11)
-    y_scale = alt.Scale(domain=order)  # force all labels
-
-    base_ch = alt.Chart(d)
-    bar = base_ch.mark_bar().encode(
-        y=alt.Y("field:N", scale=y_scale, title=None, axis=y_axis),
-        x=alt.X("value:Q", title=("Share of works" if percent else "Works"),
-                scale=x_scale, axis=x_axis),
-        color=alt.Color("domain:N", legend=None,
-                        scale=alt.Scale(domain=list(DOMAIN_COLORS),
-                                        range=[DOMAIN_COLORS[k] for k in DOMAIN_COLORS])),
-        tooltip=[
-            alt.Tooltip("field:N", title="Field"),
-            alt.Tooltip("domain:N", title="Domain"),
-            alt.Tooltip("value:Q", title=("Share" if percent else "Count"),
-                        format=(".0%" if percent else ",")),
-        ],
-    )
-
-    layers = [bar]
-    if show_counts and not percent:
-        txt = base_ch.mark_text(align="left", baseline="middle", dx=6).encode(
-            y=alt.Y("field:N", scale=y_scale, title=None),
-            x=alt.value(0),
-            text=alt.Text(f"{value_col}:Q", format=","),
+    # Whisker (min..max)
+    rules = (
+        alt.Chart(base, height=height, width=_BAR_WIDTH_PX)
+        .mark_rule()
+        .encode(
+            y=alt.Y(f"{label_col}:N", sort=None, title=""),
+            x=alt.X(f"{qcols['min']}:Q", scale=xscale, title=title),
+            x2=f"{qcols['max']}:Q",
+            color=alt.Color("__color__:N", scale=None, legend=None),
+            tooltip=list(base.columns),
         )
-        layers.append(txt)
-
-    return alt.layer(*layers).properties(
-        height=h, width=width, padding={"left": 80, "right": 6, "top": 2, "bottom": 4}
     )
+
+    # IQR box (Q1..Q3)
+    boxes = (
+        alt.Chart(base, height=height, width=_BAR_WIDTH_PX)
+        .mark_bar(opacity=0.35)
+        .encode(
+            y=alt.Y(f"{label_col}:N", sort=None, title=""),
+            x=alt.X(f"{qcols['q1']}:Q", scale=xscale, title=title),
+            x2=f"{qcols['q3']}:Q",
+            color=alt.Color("__color__:N", scale=None, legend=None),
+        )
+    )
+
+    # Median tick (Q2)
+    median = (
+        alt.Chart(base, height=height, width=_BAR_WIDTH_PX)
+        .mark_tick(size=18, thickness=2)
+        .encode(
+            y=alt.Y(f"{label_col}:N", sort=None, title=""),
+            x=f"{qcols['q2']}:Q",
+            color=alt.Color("__color__:N", scale=None, legend=None),
+        )
+    )
+
+    return rules + boxes + median
