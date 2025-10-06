@@ -181,7 +181,7 @@ with c1:
 def _lab_q(col):
     return _parse_pairs_to(drow[col], id_type=str, val_type=float).rename(columns={"id": "ROR"}).set_index("ROR")["value"]
 
-if all(k in drow for k in ["By lab: FWCI_FR min", "By lab: FWCI_FR Q1", "By lab: FWCI_FR Q2", "By lab: FWCI_FR Q3", "By lab: FWCI_FR max"]):
+if all(k in drow for k in ["By lab: FWCI_FR p5", "By lab: FWCI_FR Q1", "By lab: FWCI_FR Q2", "By lab: FWCI_FR Q3", "By lab: FWCI_FR p95"]):
     qdf = pd.DataFrame({
         "ROR": labs["ROR"].tolist(),
         "min": _lab_q("By lab: FWCI_FR p5").reindex(labs["ROR"]).values,
